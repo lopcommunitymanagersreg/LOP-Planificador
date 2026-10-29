@@ -1,6 +1,6 @@
 # LOP Planificador
 
-Aplicación web local de LOP Planificador, construida con React y JavaScript, con una API Node.js/Express y persistencia SQLite por usuario. El acceso y los borradores se guardan en este equipo. Facebook Pages y canales de YouTube disponen de conexiones OAuth oficiales opcionales; Instagram está en preparación y las demás conexiones sociales siguen siendo referencias locales.
+Aplicación web local de LOP Planificador, construida con React y JavaScript, con una API Node.js/Express y persistencia SQLite por usuario. El acceso y los borradores se guardan en este equipo. Facebook Pages, canales de YouTube e Instagram profesional disponen de flujos OAuth oficiales opcionales; cada cuenta requiere autorización real del proveedor. Las demás conexiones sociales siguen siendo referencias locales.
 
 ## Ejecutar en local
 
@@ -22,18 +22,18 @@ Los comandos `npm run server` y `npm run dev` quedan disponibles para diagnósti
 
 La base SQLite se crea automáticamente en `data/lop.sqlite`. Se puede cambiar su ubicación con la variable `LOP_DATABASE_PATH`. Los contadores de cuentas consultan SQLite en el servidor y se filtran por usuario, espacio y marca; la interfaz muestra esos totales al cargar y después de cambios en las cuentas. Las contraseñas se almacenan como hashes scrypt y la sesión usa una cookie `HttpOnly`. Los códigos se guardan como hashes, vencen a los 10 minutos y admiten hasta cinco intentos. No se guardan archivos multimedia.
 
-### Configurar Google OAuth oficial sin costo
+### Google OAuth: configuración local
 
-El acceso Google usa OAuth 2.0 oficial y solo se activa con credenciales reales. Para una prueba local no se necesita habilitar APIs de pago ni configurar facturación.
+El acceso Google usa OAuth 2.0 oficial y solo se activa con credenciales reales. LOP permanecerá en localhost hasta que sus funciones estén terminadas, comprobadas y aprobadas. Se conserva el proyecto y cliente web existentes con audiencia **Usuarios externos / Prueba**. La publicación, el dominio, HTTPS, Cloudflare y la verificación OAuth pública corresponden exclusivamente a la fase final. La conexión local se describe en [YouTube en localhost](./docs/YOUTUBE-LOCALHOST.md); no requiere publicar la app OAuth.
 
-1. Abre [Google Cloud Console](https://console.cloud.google.com/) e inicia sesión con la cuenta propietaria del proyecto. Crea un proyecto o selecciona uno existente.
-2. Abre **Google Auth Platform** (en algunas cuentas todavía aparece como **APIs y servicios > Pantalla de consentimiento OAuth**). Completa el nombre y correo de soporte. Para probar con cuentas personales, elige audiencia **Externa**, deja la aplicación en **Prueba** y agrega tu correo como usuario de prueba.
-3. En **Clientes**, crea un cliente OAuth de tipo **Aplicación web**.
+1. Abre [Google Cloud Console](https://console.cloud.google.com/) e inicia sesión con la cuenta propietaria del proyecto local existente. Conserva ese proyecto; solo una instalación nueva necesita preparar su proyecto de desarrollo.
+2. En **Google Auth Platform > Audiencia**, conserva **Usuarios externos / Prueba** y añade como usuario de prueba la cuenta Google que autorizará YouTube. El contador de usuarios OAuth no sustituye la comprobación de esta lista. No pulses **Publicar app**.
+3. En **Clientes**, abre el cliente OAuth web local existente. Solo en una instalación nueva, crea un cliente de tipo **Aplicación web**.
 4. Agrega `http://localhost:5173` en **Orígenes autorizados de JavaScript** y `http://localhost:5173/api/auth/google/callback` en **URI de redireccionamiento autorizados**. La dirección debe coincidir exactamente con el navegador y la URI que se configurará en LOP.
-5. Copia `.env.example` como `.env` en la carpeta del proyecto. Completa `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `GOOGLE_REDIRECT_URI=http://localhost:5173/api/auth/google/callback`. No compartas ni pegues el secreto en chats, capturas, Git o el navegador.
-6. Guarda `.env`, detén la ejecución actual con `Ctrl+C`, ejecuta `npm run dev:full` y abre `http://localhost:5173`. El botón de Google solo aparecerá si el servidor reconoce las credenciales. Inicia sesión con la cuenta agregada como usuario de prueba.
+5. En una instalación nueva, usa `.env.example` para crear `.env` y configura `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `GOOGLE_REDIRECT_URI=http://localhost:5173/api/auth/google/callback`. En la instalación existente conserva `.env`; no lo sobrescribas ni compartas secretos en chats, capturas, Git o el navegador.
+6. Cuando corresponda reiniciar, detén la ejecución actual con `Ctrl+C`, ejecuta `npm run dev:full` y abre `http://localhost:5173`. El botón de Google solo aparecerá si el servidor reconoce las credenciales. Inicia sesión con una cuenta permitida por la configuración de audiencia del proyecto.
 
-La configuración de consentimiento en modo Prueba limita quién puede iniciar sesión; para una aplicación pública, Google puede exigir verificación. Consulta la [guía oficial de OAuth para aplicaciones web](https://developers.google.com/identity/protocols/oauth2/web-server). Si cambias el puerto o el host de Vite, actualiza tanto el origen autorizado como la URI de redirección en Google y `GOOGLE_REDIRECT_URI`.
+Google permite los callbacks HTTP de localhost para este flujo. Los requisitos de [producción](./docs/YOUTUBE-PRODUCCION.md) quedan como referencia para la fase final y no bloquean esta conexión local. No se cambian dominios, clientes ni secretos para completar las pruebas actuales.
 
 ### Correo, verificación y recuperación
 
@@ -48,7 +48,7 @@ El registro con contraseña, la verificación y la recuperación requieren un se
 
 - Cada usuario tiene espacios de trabajo propios y puede crear, seleccionar, renombrar y eliminar espacios. Se conserva al menos un espacio por usuario. Eliminar un espacio elimina en cascada sus marcas, referencias de cuentas y borradores asociados; perfiles y datos de otros espacios o usuarios no se alteran.
 - Cada espacio inicia con una marca principal y permite agregar, editar y eliminar marcas. Las marcas guardan nombre, URL HTTPS del logotipo y configuración propia (descripción, sitio web y colores). El logotipo se muestra desde la URL y no se suben archivos multimedia a SQLite. Se conserva al menos una marca por espacio; al eliminar otra, sus cuentas y borradores se reasignan a una marca restante.
-- Las cuentas se organizan por marca y espacio. Facebook Pages y canales de YouTube pueden conectarse con OAuth oficial; sus credenciales se cifran en SQLite. Instagram está preparado para una conexión posterior con cuentas profesionales; las demás redes continúan como referencias locales no autorizadas.
+- Las cuentas se organizan por marca y espacio. Facebook Pages, canales de YouTube e Instagram profesional pueden conectarse con OAuth oficial; sus credenciales se cifran en SQLite. Las demás redes continúan como referencias locales no autorizadas.
 - La migración crea un espacio y una marca inicial por usuario existente, asigna a ellos las cuentas y los borradores ya guardados, y conserva el contenido. El propietario se verifica en cada operación de API; no se aceptan identificadores de espacio o marca de otro usuario.
 
 ### Calendario y borradores
@@ -62,9 +62,9 @@ El registro con contraseña, la verificación y la recuperación requieren un se
 - Las notas y los recordatorios se pueden crear, editar y eliminar, y quedan asociados en SQLite al usuario, espacio, marca y fecha. Se muestran en el calendario; no envían notificaciones fuera de la aplicación.
 - La exportación genera un CSV con los borradores, formatos, redes, notas y recordatorios visibles. La base conserva los datos existentes al permitir borradores sin fecha.
 
-La edición de contenido multimedia se limita a escoger un archivo en el navegador como referencia temporal; los archivos no se suben ni se guardan en SQLite. LOP no publica ni programa contenido. Las conexiones oficiales de Facebook y YouTube solo identifican las páginas/canales y sus permisos; no envían publicaciones.
+La edición de contenido multimedia se limita a escoger un archivo en el navegador como referencia temporal; los archivos no se suben ni se guardan en SQLite. LOP no publica ni programa contenido. Las conexiones oficiales de Facebook, YouTube e Instagram solo identifican las páginas/canales/cuentas y sus permisos; no envían publicaciones.
 
-Las cuentas sin autorización son referencias locales, no conexiones. Facebook y YouTube muestran el estado y permisos reales; sus cuentas se pueden reasignar entre espacios/marcas propios y eliminar localmente junto con sus credenciales cifradas. Esta fase acepta borradores; las estadísticas de publicaciones programadas o realizadas permanecen en cero. Los registros se guardan por elemento para evitar que una escritura atrasada de la lista borre cambios recientes.
+Las cuentas sin autorización son referencias locales, no conexiones. Las conexiones OAuth muestran los datos y permisos registrados al autorizarse; el proveedor puede revocar después ese acceso. YouTube e Instagram permiten consultar de nuevo a su proveedor mediante **Verificar conexión**. Las cuentas se pueden reasignar entre espacios/marcas propios y eliminar localmente junto con sus credenciales cifradas. Esta fase acepta borradores; las estadísticas de publicaciones programadas o realizadas permanecen en cero. Los registros se guardan por elemento para evitar que una escritura atrasada de la lista borre cambios recientes.
 
 ### Conectar Facebook Pages (opcional)
 
@@ -87,28 +87,53 @@ LOP pagina el listado de páginas devuelto por Meta, presenta una selección exp
 
 ### Conectar canales de YouTube (opcional)
 
-La conexión reutiliza el ID, secreto y pantalla de consentimiento OAuth de Google ya configurados para el acceso de LOP. YouTube requiere una URI de retorno adicional en ese mismo cliente. El permiso de conexión es `https://www.googleapis.com/auth/youtube.readonly`; permite listar los canales propios/autorizados y no publicar. LOP requiere un token renovable para guardar la conexión, conserva las credenciales cifradas con la clave `SOCIAL_TOKEN_ENCRYPTION_KEY` y nunca devuelve tokens al frontend.
+El flujo reside en `server/youtube.js`, registrado desde `server/index.js`; sustituye el bloque anterior, sin mantener dos implementaciones OAuth. En desarrollo reutiliza el cliente Google existente y la clave `SOCIAL_TOKEN_ENCRYPTION_KEY`. Solicita únicamente `https://www.googleapis.com/auth/youtube.readonly`, con acceso `offline`, consentimiento e incorporación de permisos ya concedidos. No solicita `youtube.upload` ni publica vídeos.
 
-1. En el proyecto ya usado en [Google Cloud Console](https://console.cloud.google.com/), habilita **YouTube Data API v3**.
-2. En **Google Auth Platform > Clientes**, abre el mismo cliente OAuth de tipo **Aplicación web** usado por Google Sign-In. Agrega `http://localhost:5173/api/connections/youtube/callback` como URI de redireccionamiento autorizada. Mantén también las URI existentes de acceso Google y Facebook sin cambios.
-3. En **Google Auth Platform > Audiencia**, para pruebas deja la aplicación en **Prueba** y agrega como usuario de prueba cada cuenta Google que autorizará YouTube. La autorización real se completa en el navegador con esa cuenta.
-4. Verifica que `.env` ya tenga el ID/secreto OAuth de Google y `SOCIAL_TOKEN_ENCRYPTION_KEY`. Si corresponde, configura `YOUTUBE_REDIRECT_URI=http://localhost:5173/api/connections/youtube/callback`; no reemplaces el secreto ni la clave de cifrado existentes. Reinicia `npm run dev:full`.
-5. Inicia sesión, abre **Cuentas sociales** y selecciona **Conectar YouTube**. Google devuelve los canales a los que tiene acceso esa cuenta; marca los deseados y asígnalos a espacios/marcas. El listado y los contadores se leen desde SQLite.
+La fase actual es exclusivamente local y mantiene **Usuarios externos / Prueba**. Deben comprobarse YouTube Data API v3 habilitada, el callback adicional en el cliente existente y la cuenta propietaria del canal en Usuarios de prueba. Los pasos exactos están en [YOUTUBE-LOCALHOST.md](./docs/YOUTUBE-LOCALHOST.md). Una conexión se considera real solo después del consentimiento, la comprobación del canal mediante la API y su persistencia; las pruebas con proveedores controlados no la certifican.
 
-Consulta la [guía oficial de OAuth para aplicaciones web de servidor](https://developers.google.com/youtube/data/guides/auth/server-side-web-apps), [autorización OAuth de Google](https://developers.google.com/identity/protocols/oauth2/web-server), [channels.list](https://developers.google.com/youtube/v3/docs/channels/list), [activación de YouTube Data API](https://developers.google.com/youtube/v3/getting-started) y [videos.insert](https://developers.google.com/youtube/v3/docs/videos/insert). La API tiene cuota diaria y Google puede exigir verificación/revisión de la aplicación para el acceso externo o scopes sensibles. La Fase 3 deberá solicitar `youtube.upload` mediante autorización incremental antes de subir videos; los uploads consumen cuota de API y no se habilitan en este paso. YouTube aplica restricciones específicas a videos de clientes API no auditados, incluido su nivel de privacidad, que se deberán comprobar al implementar publicación automática.
+Para usar la conexión local cuando el proyecto permita la autorización, debe estar habilitada **YouTube Data API v3** y registrado el callback adicional `http://localhost:5173/api/connections/youtube/callback` en el cliente web local, conservando el callback de acceso Google. `YOUTUBE_REDIRECT_URI` puede definirlo expresamente; si se omite se deriva del origen de `GOOGLE_REDIRECT_URI`. No reemplaces credenciales ni la clave de cifrado existentes. En **Cuentas sociales > Conectar YouTube**, autoriza, revisa el ID/nombre del canal devuelto y confirma su asignación a un espacio y marca propios.
 
-### Preparación de Instagram Graph API
+LOP valida el acceso con `getTokenInfo`: audiencia del cliente, scope concedido y caducidad. Antes de ofrecer canales comprueba que el refresh token pueda renovar el acceso. La selección se vincula al usuario/sesión, conserva el espacio y marca de origen y vence a los 30 minutos. Antes de guardar consulta de nuevo `channels.list(part=snippet,mine=true)`; no considera prueba de propiedad una URL o un nombre escrito manualmente.
 
-Se conserva el flujo de Facebook Pages como está. La ruta prevista es Instagram API con Facebook Login y la aplicación Meta existente: autorizar por separado los permisos de Instagram, consultar en cada página `instagram_business_account`, comprobar la cuenta profesional vinculada y guardar la cuenta/credenciales con el mismo aislamiento por usuario, cifrado y asignación a espacio/marca. La conexión de Instagram todavía no está habilitada y no aparece como exitosa.
+**Verificar conexión**, disponible en el menú y detalle de YouTube, renueva el acceso con el refresh token propio de la conexión, comprueba el token y vuelve a confirmar el canal. Guarda las credenciales renovadas con AES-256-GCM y actualiza el identificador visible del canal y su última verificación. Un error temporal conserva el estado anterior; si Google rechaza la autorización o ya no confirma el canal, solicita reconectar. No se retira el acceso global de LOP a Google como reparación, porque podría afectar al inicio de sesión. La renovación ocurre al ejecutar estos flujos; no hay una tarea permanente en segundo plano ni garantía de tokens válidos para siempre.
 
-Requisitos oficiales identificados:
+En modo Prueba, la autorización de YouTube y su refresh token vencen a los siete días. En ese caso se usa **Conectar YouTube** de nuevo: al confirmar el mismo ID oficial se actualiza la conexión existente, sin duplicarla. La renovación de un access token no prolonga una autorización de prueba ya vencida.
 
-- Solo cuentas **Instagram Business o Creator**; una cuenta personal no es compatible con Instagram API con Facebook Login.
-- La cuenta profesional debe estar vinculada a una página de Facebook que el usuario pueda administrar. La consulta del campo `instagram_business_account` permite detectar la vinculación.
-- Para identificación básica, preparar `instagram_basic`, `pages_show_list` y `pages_read_engagement`. La Fase 3 solicitará `instagram_content_publish` de forma incremental para publicar; moderación y métricas requieren permisos adicionales como `instagram_manage_comments` e `instagram_manage_insights`, solo si se aprueban esas funciones.
-- En Meta for Developers se debe habilitar/configurar Instagram Graph API y Facebook Login, agregar usuarios de prueba/roles en Desarrollo y registrar la URI exacta de retorno OAuth. Para dar servicio a cuentas fuera de los roles de la app pueden exigirse App Review, Advanced Access y verificación empresarial. No se agregan los permisos de Instagram al consentimiento actual de Facebook, para no alterar las dos páginas ya conectadas.
+El endpoint `POST /api/connections/:connectionId/verify` se comparte con Instagram y verifica solo una conexión propia del espacio activo. Se conservan las rutas `/api/connections/youtube/authorize`, `/callback`, `/selections/pending` y `/selections/:selectionId` (consulta, confirmación o cancelación). La migración añade `custom_url` y `verified_at` a las conexiones y `workspace_id`/`brand_id` a las selecciones, sin reemplazar los registros existentes.
 
-Fuentes oficiales: [Instagram API con Facebook Login y limitaciones](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login), [inicio rápido](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/get-started), [permisos Meta](https://developers.facebook.com/documentation/development/permissions) y [publicación de contenido](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/content-publishing).
+`mine=true` no garantiza listar todas las cuentas de marca administradas desde un correo; debe comprobarse el canal autorizado. Ser invitado mediante permisos de YouTube Studio tampoco concede por sí solo acceso mediante YouTube APIs. Las condiciones oficiales y los pasos públicos están en [YOUTUBE-PRODUCCION.md](./docs/YOUTUBE-PRODUCCION.md). Las pruebas de `tests/youtube.test.js` usan proveedores controlados y SQLite temporal, además de las pruebas de regresión existentes; no certifican la configuración Cloud ni una conexión real.
+
+### Conectar Instagram profesional (opcional)
+
+El flujo implementado usa **Instagram API with Facebook Login**, con la misma app Meta de Facebook y una autorización separada. Reutiliza `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, `META_GRAPH_API_VERSION` y `SOCIAL_TOKEN_ENCRYPTION_KEY`; no reemplaces esos valores ni sus tokens existentes. La disponibilidad del botón no confirma que una cuenta ya esté conectada: Meta debe autorizar los permisos y verificar la cuenta profesional vinculada.
+
+La autorización real de Instagram permanece aplazada mientras se resuelve la validación SMS de Meta. Su implementación se conserva para retomarla; no se presenta como una conexión real completada.
+
+1. Usa una cuenta **Instagram Business o Creator** vinculada a una página de Facebook que puedas administrar. Una cuenta personal no es compatible con este flujo. En la app Meta existente, comprueba que esté habilitado el acceso de Instagram con Facebook Login y que la cuenta tenga los roles necesarios para las pruebas en Desarrollo. Para usuarios externos, Meta puede exigir App Review, Advanced Access y verificación empresarial.
+2. Registra `http://localhost:5173/api/connections/instagram/callback` como URI OAuth válida en esa app, conservando las URI de Facebook y las de Google/YouTube en sus respectivos clientes. `INSTAGRAM_REDIRECT_URI` es opcional: si se omite, LOP deriva ese callback del origen de `FACEBOOK_REDIRECT_URI`. El host, puerto y ruta deben coincidir exactamente. No hace falta volver a crear la app ni generar otra clave de cifrado.
+3. Reinicia `npm run dev:full`, inicia sesión, selecciona una marca y abre **Cuentas sociales > Conectar Instagram**. Este botón solicita `instagram_basic`, `pages_show_list` y `pages_read_engagement`, además de `business_management` para consultar portafolios cuando se conceda. Este último es opcional para el listado por `/me/accounts`. No se solicita `instagram_content_publish`, no se publica contenido y el botón **Conectar Facebook** conserva su consentimiento propio.
+4. Después del retorno, revisa el usuario de Instagram y la página vinculada. Selecciona primero una sola cuenta de prueba, asígnala a su espacio y marca, y confirma. LOP vuelve a consultar Meta antes de guardar; no basta con escribir un usuario manualmente ni con que la página figure en una conexión Facebook anterior. Comprueba esa cuenta antes de conectar la siguiente.
+5. En el menú o detalle de la cuenta Instagram, usa **Verificar conexión**. La comprobación consulta `debug_token` para validar la app emisora, los permisos y las caducidades disponibles; también vuelve a consultar el vínculo `instagram_business_account` de la página y el perfil `id,username,name`. La interfaz muestra el usuario, la página y la última verificación. Si Meta deja de confirmar la autorización o el vínculo, pide reconectar; un fallo temporal conserva el estado anterior y permite reintentar.
+
+LOP descubre páginas mediante Business Manager cuando se autoriza y mediante `/me/accounts`, y comprueba cada página con el consentimiento nuevo. Una conexión Facebook guardada y sus scopes son un registro de la autorización anterior: no prueban que `instagram_basic` siga concedido ni que el vínculo profesional sea accesible ahora. Un error OAuth o de permisos debe resolverse revisando la autorización y los activos permitidos en Meta y repitiendo **Conectar Instagram**; por sí solo no demuestra que un token haya vencido. No se marca una conexión como exitosa cuando Meta rechaza la comprobación.
+
+Las tablas `instagram_oauth_states`, `instagram_account_selections` e `instagram_connections` se crean aparte de las conexiones Facebook. El estado OAuth es de un solo uso y tanto este como la selección temporal se vinculan al usuario/sesión y vencen a los 30 minutos. Los tokens y las selecciones se cifran con AES-256-GCM y no se devuelven al frontend. Solo se guardan las cuentas confirmadas y verificadas, aisladas por usuario, espacio y marca. No se garantiza acceso permanente ni renovación automática.
+
+Rutas implementadas (requieren sesión, salvo el callback, que valida la sesión asociada al estado OAuth):
+
+| Método | Ruta | Función |
+|---|---|---|
+| GET | `/api/connections/instagram/authorize` | Iniciar autorización para `brandId` del espacio activo. |
+| GET | `/api/connections/instagram/callback` | Validar retorno y crear la selección de cuentas verificadas. |
+| GET | `/api/connections/instagram/selections/pending` | Recuperar selecciones vigentes de la sesión. |
+| GET | `/api/connections/instagram/selections/:selectionId` | Consultar una selección sin exponer tokens. |
+| POST | `/api/connections/instagram/selections/:selectionId` | Verificar y guardar `accounts` con `providerAccountId`, `workspaceId` y `brandId`. |
+| DELETE | `/api/connections/instagram/selections/:selectionId` | Cancelar una selección. |
+| POST | `/api/connections/:connectionId/verify` | Verificar con Meta una conexión Instagram del espacio activo. |
+
+Las rutas existentes `PATCH` y `DELETE /api/connections/:connectionId` también permiten reasignar o eliminar localmente una conexión Instagram. Las pruebas de `tests/instagram.test.js` usan respuestas controladas y una SQLite temporal para comprobar el flujo, sus límites de sesión/propiedad, el cifrado y los errores; no sustituyen la autorización y verificación reales en Meta.
+
+Fuentes oficiales: [Instagram API con Facebook Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login), [inicio rápido](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/get-started), [permisos Meta](https://developers.facebook.com/documentation/development/permissions) y [colección oficial de Meta: páginas y tokens](https://www.postman.com/meta/instagram/request/0vuw3vk/get-access-tokens-of-pages-you-manage).
 
 Para ejecutar las pruebas del backend:
 
@@ -143,7 +168,7 @@ La versión 1.0 se considerará terminada después de completar las fases siguie
 2. Implementar acceso de usuario y espacios/marcas.
 3. Desarrollar calendario, borradores y metadatos de publicaciones; no conservar copias de archivos multimedia en servidores propios.
 4. Implementar las conexiones oficiales OAuth y el panel de cuentas, después de tener credenciales y permisos de desarrollador.
-5. Completar Facebook y YouTube con canales reales y dejar Instagram preparado sobre Meta, manteniendo separados los estados de borrador, programada, enviada, publicada y fallida.
+5. Completar Facebook y YouTube con canales reales y la conexión de Instagram profesional mediante Meta, manteniendo separados los estados de borrador, programada, enviada, publicada y fallida.
 
 **Resultado esperado:** aplicación web que permite gestionar el espacio, las conexiones y el calendario, inicialmente con una red de prueba.
 

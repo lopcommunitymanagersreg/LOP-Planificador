@@ -17,6 +17,9 @@ import { OAuth2Client } from 'google-auth-library';
 import express from 'express';
 import helmet from 'helmet';
 import nodemailer from 'nodemailer';
+import { createInstagramOAuthConfig, initializeInstagramDatabase, registerInstagramRoutes } from './instagram.js';
+import { initializeYouTubeDatabase, registerYouTubeRoutes } from './youtube.js';
+import { createFacebookVerifier, registerFacebookVerification } from './facebook.js';
 
 const scrypt = promisify(scryptCallback);
 const sessionCookie = 'lop_session';
@@ -166,6 +169,12 @@ function createDatabase(databasePath) {
     CREATE TABLE IF NOT EXISTS user_workspace_settings (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       active_workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS workspace_brand_selections (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      brand_id TEXT REFERENCES brands(id) ON DELETE SET NULL,
+      PRIMARY KEY (user_id, workspace_id)
     );
     CREATE TABLE IF NOT EXISTS verification_codes (
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -401,6 +410,15 @@ function createDatabase(databasePath) {
   });
   migrateUserWorkspaces();
   database.exec('CREATE INDEX IF NOT EXISTS calendar_notes_date ON calendar_notes(user_id, workspace_id, brand_id, note_date)');
+  if (!database.pragma('table_info(posts)').some((column) => column.name === 'account_ids')) database.exec("ALTER TABLE posts ADD COLUMN account_ids TEXT NOT NULL DEFAULT '[]'");
+  const facebookColumns = new Set(database.pragma('table_info(social_connections)').map((column) => column.name));
+  if (!facebookColumns.has('verified_at')) database.exec('ALTER TABLE social_connections ADD COLUMN verified_at TEXT');
+  if (!facebookColumns.has('last_error_code')) database.exec('ALTER TABLE social_connections ADD COLUMN last_error_code TEXT');
+  database.exec(`CREATE TABLE IF NOT EXISTS social_card_orders (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    account_ids_json TEXT NOT NULL DEFAULT '[]', PRIMARY KEY (user_id, workspace_id)
+  )`);
   database.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
   database.prepare("UPDATE social_accounts SET status = 'demo' WHERE status != 'demo'").run();
   database.prepare("UPDATE posts SET status = 'draft' WHERE status != 'draft'").run();
@@ -425,13 +443,15 @@ function normalizePost(post) {
   if (selectedNetworks.length > networkIds.size || selectedNetworks.some((id) => !networkIds.has(id))) return null;
   if (post.networkId != null && !networkIds.has(post.networkId)) return null;
   const networkContent = {};
+  const accountIds = post.accountIds ?? [];
+  if (!Array.isArray(accountIds) || accountIds.length > 1000 || accountIds.some((id) => !validText(id, 150)) || new Set(accountIds).size !== accountIds.length) return null;
   if (post.networkContent !== undefined
     && (!post.networkContent || typeof post.networkContent !== 'object' || Array.isArray(post.networkContent))) return null;
   for (const [networkId, content] of Object.entries(post.networkContent || {})) {
     if (!selectedNetworks.includes(networkId) || !content || typeof content !== 'object' || Array.isArray(content)) return null;
     if (Object.keys(content).some((field) => !['title', 'description', 'text', 'hashtags', 'settings'].includes(field))) return null;
     const normalizedContent = {};
-    for (const [field, maxLength] of Object.entries({ title: 200, description: 2000, text: 5000, hashtags: 1000 })) {
+    for (const [field, maxLength] of Object.entries({ title: 200, description: networkId === 'youtube' ? 5000 : 2000, text: 5000, hashtags: 1000 })) {
       const value = content[field] ?? '';
       if (typeof value !== 'string' || value.length > maxLength) return null;
       if (value.trim()) normalizedContent[field] = value.trim();
@@ -464,6 +484,7 @@ function normalizePost(post) {
     networkId: post.networkId || null,
     networkIds: [...new Set(selectedNetworks)],
     networkContent,
+    accountIds,
     status: 'draft',
     date: post.date === null ? null : new Date(post.date).toISOString(),
     format: post.format || 'text',
@@ -550,14 +571,19 @@ function createGoogleClient() {
   const localHttp = redirect.protocol === 'http:'
     && ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname);
   if ((!localHttp && redirect.protocol !== 'https:')
+    || redirect.username || redirect.password
     || redirect.pathname !== '/api/auth/google/callback'
     || redirect.search || redirect.hash) {
     throw new Error('GOOGLE_REDIRECT_URI debe usar HTTPS (o localhost HTTP) y terminar exactamente en /api/auth/google/callback.');
   }
+  if (process.env.NODE_ENV === 'production' && (redirect.protocol !== 'https:'
+    || ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname) || redirect.hostname.endsWith('.localhost'))) {
+    throw new Error('En producción, GOOGLE_REDIRECT_URI debe usar el dominio público HTTPS del entorno de producción.');
+  }
   return new OAuth2Client(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
 }
 
-function createYouTubeOAuthConfig(environment = process.env) {
+export function createYouTubeOAuthConfig(environment = process.env) {
   const missing = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'].filter((key) => !environment[key]);
   const googleRedirectUri = environment.GOOGLE_REDIRECT_URI;
   const redirectUri = environment.YOUTUBE_REDIRECT_URI || (googleRedirectUri
@@ -572,9 +598,14 @@ function createYouTubeOAuthConfig(environment = process.env) {
   const localHttp = redirect.protocol === 'http:'
     && ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname);
   if ((!localHttp && redirect.protocol !== 'https:')
+    || redirect.username || redirect.password
     || redirect.pathname !== '/api/connections/youtube/callback'
     || redirect.search || redirect.hash) {
     throw new Error('YOUTUBE_REDIRECT_URI debe usar HTTPS (o localhost HTTP) y terminar exactamente en /api/connections/youtube/callback.');
+  }
+  if (environment.NODE_ENV === 'production' && (redirect.protocol !== 'https:'
+    || ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname) || redirect.hostname.endsWith('.localhost'))) {
+    throw new Error('En producción, YOUTUBE_REDIRECT_URI debe usar el dominio público HTTPS del entorno de producción.');
   }
   return {
     configured: missing.length === 0,
@@ -591,6 +622,7 @@ export function createApp({
   googleClient = createGoogleClient(),
   googleClientId = process.env.GOOGLE_CLIENT_ID,
   facebookOAuthConfig = createFacebookOAuthConfig(),
+  instagramOAuthConfig = createInstagramOAuthConfig(),
   youtubeOAuthConfig = createYouTubeOAuthConfig(),
   youtubeOAuthClient = youtubeOAuthConfig.configured
     ? new OAuth2Client(youtubeOAuthConfig.clientId, youtubeOAuthConfig.clientSecret, youtubeOAuthConfig.redirectUri)
@@ -600,6 +632,8 @@ export function createApp({
 } = {}) {
   mkdirSync(dirname(databasePath), { recursive: true });
   const database = createDatabase(databasePath);
+  initializeInstagramDatabase(database);
+  initializeYouTubeDatabase(database);
   const app = express();
   const secureCookie = process.env.NODE_ENV === 'production';
   const sessionCookieOptions = {
@@ -1069,6 +1103,18 @@ export function createApp({
     `).run(userId, fallback.id);
     return fallback.id;
   };
+  const getActiveBrandId = (userId, workspaceId) => {
+    const selection = database.prepare('SELECT brand_id AS brandId FROM workspace_brand_selections WHERE user_id = ? AND workspace_id = ?')
+      .get(userId, workspaceId);
+    if (selection) {
+      return selection.brandId && database.prepare('SELECT 1 FROM brands WHERE id = ? AND workspace_id = ?').get(selection.brandId, workspaceId)
+        ? selection.brandId : null;
+    }
+    const brandId = database.prepare('SELECT id FROM brands WHERE workspace_id = ? ORDER BY created_at, id LIMIT 1').get(workspaceId)?.id || null;
+    database.prepare('INSERT INTO workspace_brand_selections (user_id, workspace_id, brand_id) VALUES (?, ?, ?)')
+      .run(userId, workspaceId, brandId);
+    return brandId;
+  };
   const getWorkspaceList = (userId) => database.prepare(`
     SELECT id, name, created_at AS createdAt FROM workspaces
     WHERE user_id = ? ORDER BY created_at, id
@@ -1097,11 +1143,16 @@ export function createApp({
         optionalPermissions: ['business_management'],
       },
       instagram: {
-        available: false,
+        available: Boolean(instagramOAuthConfig.configured && socialTokenEncryptionKey),
+        missing: [
+          ...(instagramOAuthConfig.missing || []),
+          ...(!socialTokenEncryptionKey ? ['SOCIAL_TOKEN_ENCRYPTION_KEY'] : []),
+        ],
         requiredPermissions: ['instagram_basic', 'pages_show_list', 'pages_read_engagement'],
+        optionalPermissions: ['business_management'],
         futurePublishingPermission: 'instagram_content_publish',
         accountRequirement: 'Cuenta profesional de Instagram (Business o Creator) vinculada a una página de Facebook administrable.',
-        reason: 'Preparación lista; aún no inicia OAuth de Instagram ni guarda conexiones.',
+        reason: 'OAuth separado mediante Facebook Login; verifica la cuenta profesional y permite asignarla a una marca.',
       },
       threads: { available: false, reason: 'Integración pendiente de la validación secuencial de Facebook.' },
       tiktok: { available: false, reason: 'Integración pendiente de la validación secuencial de Facebook.' },
@@ -1490,320 +1541,10 @@ export function createApp({
     }
   });
 
-  const youtubeOAuthFailureRedirect = (response, reason) =>
-    response.redirect(`/?connection=youtube-error&reason=${encodeURIComponent(reason)}`);
-
-  app.get('/api/connections/youtube/authorize', requireSession, (request, response) => {
-    if (!youtubeOAuthConfig.configured || !youtubeOAuthClient) {
-      return jsonError(response, 503, 'La conexión oficial de YouTube requiere las credenciales OAuth de Google.');
-    }
-    if (!socialTokenEncryptionKey) {
-      return jsonError(response, 503, 'Configura una clave local de cifrado antes de conectar cuentas sociales.');
-    }
-    const workspaceId = getActiveWorkspaceId(request.user.id);
-    const brandId = request.query.brandId;
-    if (!validText(brandId, 150)
-      || !database.prepare('SELECT id FROM brands WHERE id = ? AND workspace_id = ?').get(brandId, workspaceId)) {
-      return jsonError(response, 400, 'Selecciona una marca del espacio activo antes de conectar YouTube.');
-    }
-    database.prepare('DELETE FROM youtube_oauth_states WHERE expires_at <= ?').run(Date.now());
-    database.prepare('DELETE FROM youtube_channel_selections WHERE expires_at <= ?').run(Date.now());
-    const state = randomBytes(32).toString('base64url');
-    database.prepare(`
-      INSERT INTO youtube_oauth_states
-        (state_hash, user_id, session_token_hash, workspace_id, brand_id, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      hash(state),
-      request.user.id,
-      request.sessionTokenHash,
-      workspaceId,
-      brandId,
-      Date.now() + socialOAuthStateDurationMs,
-    );
-    const authorizationUrl = youtubeOAuthClient.generateAuthUrl({
-      access_type: 'offline',
-      include_granted_scopes: true,
-      prompt: 'consent',
-      scope: [youtubeReadOnlyScope],
-      state,
-    });
-    response.redirect(authorizationUrl);
-  });
-
-  app.get('/api/connections/youtube/callback', async (request, response) => {
-    const returnedState = typeof request.query.state === 'string' ? request.query.state : '';
-    const stateRecord = returnedState ? database.prepare(`
-      SELECT state_hash AS stateHash, user_id AS userId, session_token_hash AS sessionTokenHash,
-        workspace_id AS workspaceId, brand_id AS brandId, expires_at AS expiresAt
-      FROM youtube_oauth_states WHERE state_hash = ?
-    `).get(hash(returnedState)) : null;
-    if (stateRecord) {
-      database.prepare('DELETE FROM youtube_oauth_states WHERE state_hash = ?').run(stateRecord.stateHash);
-    }
-    if (!stateRecord) return youtubeOAuthFailureRedirect(response, 'invalid-state');
-    if (stateRecord.expiresAt <= Date.now()) return youtubeOAuthFailureRedirect(response, 'state-expired');
-    if (request.query.error || typeof request.query.code !== 'string') {
-      return youtubeOAuthFailureRedirect(response, request.query.error === 'access_denied' ? 'cancelled' : 'provider-error');
-    }
-    const sessionToken = parseCookies(request.get('cookie'))[sessionCookie];
-    if (!sessionToken || hash(sessionToken) !== stateRecord.sessionTokenHash
-      || !database.prepare('SELECT 1 FROM sessions WHERE token_hash = ? AND user_id = ? AND expires_at > ?')
-        .get(stateRecord.sessionTokenHash, stateRecord.userId, Date.now())) {
-      return youtubeOAuthFailureRedirect(response, 'session-expired');
-    }
-    if (!youtubeOAuthConfig.configured || !youtubeOAuthClient || !socialTokenEncryptionKey) {
-      return youtubeOAuthFailureRedirect(response, 'not-configured');
-    }
-
-    try {
-      const { tokens } = await youtubeOAuthClient.getToken(String(request.query.code));
-      const grantedScopes = typeof tokens.scope === 'string' ? tokens.scope.split(/\s+/).filter(Boolean) : [];
-      if (typeof tokens.access_token !== 'string' || typeof tokens.refresh_token !== 'string'
-        || !grantedScopes.includes(youtubeReadOnlyScope)) {
-        return youtubeOAuthFailureRedirect(response, 'refresh-token-required');
-      }
-
-      const channelsUrl = new URL('https://youtube.googleapis.com/youtube/v3/channels');
-      channelsUrl.searchParams.set('part', 'snippet');
-      channelsUrl.searchParams.set('mine', 'true');
-      channelsUrl.searchParams.set('maxResults', '50');
-      const channelsResponse = await fetchImpl(channelsUrl, {
-        headers: { Authorization: `Bearer ${tokens.access_token}` },
-        signal: AbortSignal.timeout(15000),
-      });
-      let payload;
-      try {
-        payload = await channelsResponse.json();
-      } catch {
-        throw new Error('YouTube devolvió una respuesta no válida al listar canales.');
-      }
-      if (!channelsResponse.ok) {
-        const providerReason = payload?.error?.errors?.[0]?.reason;
-        throw Object.assign(new Error('Google no autorizó el listado de canales.'), {
-          providerReason: typeof providerReason === 'string' ? providerReason : `HTTP_${channelsResponse.status}`,
-        });
-      }
-      if (!Array.isArray(payload.items)) throw new Error('YouTube devolvió una lista de canales no válida.');
-      const channels = payload.items
-        .filter((channel) => typeof channel?.id === 'string' && channel.id.length <= 100
-          && typeof channel.snippet?.title === 'string')
-        .map((channel) => ({
-          id: channel.id,
-          name: channel.snippet.title.slice(0, 120),
-          customUrl: typeof channel.snippet.customUrl === 'string' ? channel.snippet.customUrl.slice(0, 120) : '',
-        }));
-      if (!channels.length) return youtubeOAuthFailureRedirect(response, 'no-channels');
-
-      const selectionId = randomUUID();
-      const selectionAad = `youtube-selection:${stateRecord.userId}:${stateRecord.sessionTokenHash}:${selectionId}`;
-      const credentials = JSON.stringify({
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token,
-        expiresAt: typeof tokens.expiry_date === 'number' ? tokens.expiry_date : null,
-      });
-      database.prepare(`
-        INSERT INTO youtube_channel_selections (
-          id, user_id, session_token_hash, channels_encrypted, credentials_encrypted,
-          granted_scopes_json, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        selectionId,
-        stateRecord.userId,
-        stateRecord.sessionTokenHash,
-        encryptSocialToken(JSON.stringify(channels), socialTokenEncryptionKey, `${selectionAad}:channels`),
-        encryptSocialToken(credentials, socialTokenEncryptionKey, `${selectionAad}:credentials`),
-        JSON.stringify(grantedScopes),
-        Date.now() + youtubeChannelSelectionDurationMs,
-      );
-      return response.redirect(`/?connection=youtube-select&selection=${encodeURIComponent(selectionId)}`);
-    } catch (error) {
-      console.error('No se pudo completar la conexión oficial de YouTube:', error.providerReason || error.message);
-      return youtubeOAuthFailureRedirect(response, 'provider-error');
-    }
-  });
-
-  const getYouTubeChannelSelection = (request, selectionId) => database.prepare(`
-    SELECT id, user_id AS userId, session_token_hash AS sessionTokenHash,
-      channels_encrypted AS channelsEncrypted, credentials_encrypted AS credentialsEncrypted,
-      granted_scopes_json AS grantedScopes, expires_at AS expiresAt
-    FROM youtube_channel_selections
-    WHERE id = ? AND user_id = ? AND session_token_hash = ?
-  `).get(selectionId, request.user.id, request.sessionTokenHash);
-
-  const decryptYouTubeChannelSelection = (selection) => {
-    const selectionAad = `youtube-selection:${selection.userId}:${selection.sessionTokenHash}:${selection.id}`;
-    const channels = JSON.parse(decryptSocialToken(
-      selection.channelsEncrypted,
-      socialTokenEncryptionKey,
-      `${selectionAad}:channels`,
-    ));
-    const credentials = JSON.parse(decryptSocialToken(
-      selection.credentialsEncrypted,
-      socialTokenEncryptionKey,
-      `${selectionAad}:credentials`,
-    ));
-    if (!Array.isArray(channels) || typeof credentials.refreshToken !== 'string') {
-      throw new Error('La selección cifrada de YouTube tiene un formato no válido.');
-    }
-    return { channels, credentials };
-  };
-
-  app.get('/api/connections/youtube/selections/pending', requireSession, (request, response) => {
-    if (!socialTokenEncryptionKey) return jsonError(response, 503, 'La clave local de cifrado ya no está disponible.');
-    const selections = database.prepare(`
-      SELECT id, user_id AS userId, session_token_hash AS sessionTokenHash,
-        channels_encrypted AS channelsEncrypted, credentials_encrypted AS credentialsEncrypted,
-        granted_scopes_json AS grantedScopes, expires_at AS expiresAt
-      FROM youtube_channel_selections
-      WHERE user_id = ? AND session_token_hash = ? AND expires_at > ?
-      ORDER BY created_at DESC LIMIT 5
-    `).all(request.user.id, request.sessionTokenHash, Date.now());
-    try {
-      const pending = selections.map((selection) => {
-        const { channels } = decryptYouTubeChannelSelection(selection);
-        return {
-          id: selection.id,
-          expiresAt: selection.expiresAt,
-          grantedScopes: JSON.parse(selection.grantedScopes),
-          channels,
-        };
-      });
-      response.json({ pending });
-    } catch (error) {
-      console.error('No se pudo recuperar una selección pendiente de YouTube:', error.message);
-      return jsonError(response, 500, 'No se pudo recuperar de forma segura la selección de canales.');
-    }
-  });
-
-  app.get('/api/connections/youtube/selections/:selectionId', requireSession, (request, response) => {
-    const selection = getYouTubeChannelSelection(request, request.params.selectionId);
-    if (!selection) return jsonError(response, 404, 'La selección de canales venció o no pertenece a esta sesión.');
-    if (selection.expiresAt <= Date.now()) return jsonError(response, 410, 'La selección temporal venció. Vuelve a autorizar YouTube para cargar los canales.');
-    if (!socialTokenEncryptionKey) return jsonError(response, 503, 'La clave local de cifrado ya no está disponible.');
-    try {
-      const { channels } = decryptYouTubeChannelSelection(selection);
-      response.json({
-        selection: {
-          id: selection.id,
-          expiresAt: selection.expiresAt,
-          grantedScopes: JSON.parse(selection.grantedScopes),
-          channels,
-        },
-      });
-    } catch (error) {
-      console.error('No se pudo cargar una selección de canales YouTube:', error.message);
-      return jsonError(response, 500, 'No se pudo recuperar de forma segura la selección de canales.');
-    }
-  });
-
-  app.post('/api/connections/youtube/selections/:selectionId', requireSession, (request, response) => {
-    const selection = getYouTubeChannelSelection(request, request.params.selectionId);
-    if (!selection) return jsonError(response, 404, 'La selección de canales venció o no pertenece a esta sesión.');
-    if (selection.expiresAt <= Date.now()) return jsonError(response, 410, 'La selección temporal venció. Vuelve a autorizar YouTube para cargar los canales.');
-    if (!socialTokenEncryptionKey) return jsonError(response, 503, 'La clave local de cifrado ya no está disponible.');
-    const assignments = request.body?.channels;
-    if (!Array.isArray(assignments) || assignments.length < 1 || assignments.length > 50) {
-      return jsonError(response, 400, 'Selecciona entre uno y 50 canales de YouTube.');
-    }
-    let decrypted;
-    try {
-      decrypted = decryptYouTubeChannelSelection(selection);
-    } catch (error) {
-      console.error('No se pudo validar una selección de canales YouTube:', error.message);
-      return jsonError(response, 500, 'No se pudo validar de forma segura la selección de canales.');
-    }
-    const selectedIds = assignments.map((assignment) => assignment?.providerChannelId);
-    if (selectedIds.some((id) => typeof id !== 'string')
-      || new Set(selectedIds).size !== selectedIds.length
-      || selectedIds.some((id) => !decrypted.channels.some((channel) => channel.id === id))) {
-      return jsonError(response, 400, 'La selección contiene canales no autorizados.');
-    }
-    for (const assignment of assignments) {
-      if (!validText(assignment.workspaceId, 150) || !validText(assignment.brandId, 150)
-        || !database.prepare('SELECT id FROM workspaces WHERE id = ? AND user_id = ?')
-          .get(assignment.workspaceId, request.user.id)
-        || !database.prepare('SELECT id FROM brands WHERE id = ? AND workspace_id = ?')
-          .get(assignment.brandId, assignment.workspaceId)) {
-        return jsonError(response, 400, 'Asigna cada canal a un espacio y marca de tu cuenta.');
-      }
-    }
-
-    try {
-      const connectChannels = database.transaction(() => {
-        for (const assignment of assignments) {
-          const channel = decrypted.channels.find((item) => item.id === assignment.providerChannelId);
-          const existing = database.prepare(`
-            SELECT id, account_id AS accountId FROM youtube_connections
-            WHERE user_id = ? AND provider_channel_id = ?
-          `).get(request.user.id, channel.id);
-          const accountId = existing?.accountId || `account-${randomUUID()}`;
-          const connectionId = existing?.id || `youtube-${randomUUID()}`;
-          const credentialsEncrypted = encryptSocialToken(
-            JSON.stringify(decrypted.credentials),
-            socialTokenEncryptionKey,
-            `youtube-connection:${request.user.id}:${connectionId}`,
-          );
-          if (existing) {
-            database.prepare(`
-              UPDATE social_accounts
-              SET name = ?, network_id = 'youtube', workspace_id = ?, brand_id = ?
-              WHERE user_id = ? AND id = ?
-            `).run(channel.name, assignment.workspaceId, assignment.brandId, request.user.id, accountId);
-            database.prepare(`
-              UPDATE youtube_connections
-              SET workspace_id = ?, brand_id = ?, status = 'connected',
-                credentials_encrypted = ?, granted_scopes_json = ?, updated_at = CURRENT_TIMESTAMP
-              WHERE id = ? AND user_id = ?
-            `).run(
-              assignment.workspaceId,
-              assignment.brandId,
-              credentialsEncrypted,
-              selection.grantedScopes,
-              connectionId,
-              request.user.id,
-            );
-          } else {
-            database.prepare(`
-              INSERT INTO social_accounts
-                (id, user_id, name, network_id, status, preference_enabled, workspace_id, brand_id)
-              VALUES (?, ?, ?, 'youtube', 'demo', 1, ?, ?)
-            `).run(accountId, request.user.id, channel.name, assignment.workspaceId, assignment.brandId);
-            database.prepare(`
-              INSERT INTO youtube_connections (
-                id, user_id, account_id, workspace_id, brand_id, provider_channel_id,
-                status, credentials_encrypted, granted_scopes_json
-              ) VALUES (?, ?, ?, ?, ?, ?, 'connected', ?, ?)
-            `).run(
-              connectionId,
-              request.user.id,
-              accountId,
-              assignment.workspaceId,
-              assignment.brandId,
-              channel.id,
-              credentialsEncrypted,
-              selection.grantedScopes,
-            );
-          }
-        }
-        database.prepare('DELETE FROM youtube_channel_selections WHERE id = ? AND user_id = ?')
-          .run(selection.id, request.user.id);
-      });
-      connectChannels();
-      response.json({ connectedCount: assignments.length });
-    } catch (error) {
-      console.error('No se pudieron guardar las conexiones oficiales de YouTube:', error.message);
-      return jsonError(response, 500, 'No se pudieron guardar de forma segura los canales seleccionados.');
-    }
-  });
-
-  app.delete('/api/connections/youtube/selections/:selectionId', requireSession, (request, response) => {
-    const deleted = database.prepare(`
-      DELETE FROM youtube_channel_selections
-      WHERE id = ? AND user_id = ? AND session_token_hash = ?
-    `).run(request.params.selectionId, request.user.id, request.sessionTokenHash);
-    if (!deleted.changes) return jsonError(response, 404, 'La selección de canales ya venció o no existe.');
-    response.status(204).end();
+  registerYouTubeRoutes({
+    app, database, config: youtubeOAuthConfig, oauthClient: youtubeOAuthClient,
+    encryptionKey: socialTokenEncryptionKey, encryptToken: encryptSocialToken, decryptToken: decryptSocialToken,
+    requireSession, getActiveWorkspaceId, parseCookies, fetchImpl,
   });
 
   const getFacebookPageSelection = (request, selectionId) => database.prepare(`
@@ -1874,7 +1615,7 @@ export function createApp({
     }
   });
 
-  app.post('/api/connections/facebook/page-selections/:selectionId', requireSession, (request, response) => {
+  app.post('/api/connections/facebook/page-selections/:selectionId', requireSession, async (request, response) => {
     const selection = getFacebookPageSelection(request, request.params.selectionId);
     if (!selection) return jsonError(response, 404, 'La selección de páginas venció o no pertenece a esta sesión.');
     if (selection.expiresAt <= Date.now()) return jsonError(response, 410, 'La selección temporal venció. Vuelve a autorizar Facebook.');
@@ -1909,8 +1650,18 @@ export function createApp({
       selectedPages.push({ page, workspaceId: item.workspaceId, brandId: item.brandId });
     }
 
+    try {
+      for (const selected of selectedPages) selected.verified = await verifyFacebookPage(selected.page.access_token, selected.page.id);
+    } catch (error) {
+      return jsonError(response, error.reason === 'api-blocked' ? 503 : 422, error.reason === 'api-blocked'
+        ? 'Meta bloqueó el acceso de la aplicación. Revisa sus avisos en Meta antes de volver a autorizar; las conexiones existentes se conservaron.'
+        : 'Meta no confirmó la identidad y los permisos de las páginas seleccionadas. No se modificó ninguna conexión.');
+    }
+    if (!database.prepare('SELECT 1 FROM sessions WHERE token_hash = ? AND user_id = ? AND expires_at > ?').get(request.sessionTokenHash, request.user.id, Date.now())) return jsonError(response, 401, 'La sesión venció durante la comprobación.');
+    if (selection.expiresAt <= Date.now() || !getFacebookPageSelection(request, selection.id)) return jsonError(response, 410, 'La selección temporal venció.');
+    if (selectedPages.some(({ workspaceId, brandId }) => !database.prepare('SELECT 1 FROM brands b JOIN workspaces w ON w.id = b.workspace_id WHERE b.id = ? AND w.id = ? AND w.user_id = ?').get(brandId, workspaceId, request.user.id))) return jsonError(response, 409, 'Las marcas cambiaron durante la comprobación.');
     const saveSelectedPages = database.transaction(() => {
-      for (const { page, workspaceId, brandId } of selectedPages) {
+      for (const { page, workspaceId, brandId, verified } of selectedPages) {
         const existing = database.prepare(`
           SELECT id, account_id AS accountId FROM social_connections
           WHERE user_id = ? AND network_id = 'facebook' AND provider_account_id = ?
@@ -1948,9 +1699,11 @@ export function createApp({
           page.id,
           selection.providerUserId,
           encryptedToken,
-          null,
-          selection.grantedScopes,
+          verified.expiresAt,
+          JSON.stringify(verified.scopes),
         );
+        database.prepare('UPDATE social_connections SET verified_at = ?, last_error_code = NULL WHERE user_id = ? AND network_id = ? AND provider_account_id = ?')
+          .run(verified.verifiedAt, request.user.id, 'facebook', page.id);
       }
       database.prepare('DELETE FROM facebook_page_selections WHERE id = ? AND user_id = ?')
         .run(selection.id, request.user.id);
@@ -1994,6 +1747,32 @@ export function createApp({
     response.json({ event });
   });
 
+  const verifyFacebookPage = createFacebookVerifier({ config: facebookOAuthConfig, fetchImpl });
+  registerFacebookVerification({ app, database, config: facebookOAuthConfig, encryptionKey: socialTokenEncryptionKey,
+    decryptToken: decryptSocialToken, requireSession, getActiveWorkspaceId, verifyPage: verifyFacebookPage });
+
+  registerInstagramRoutes({
+    app, database, config: instagramOAuthConfig, encryptionKey: socialTokenEncryptionKey,
+    encryptToken: encryptSocialToken, decryptToken: decryptSocialToken,
+    requireSession, getActiveWorkspaceId, fetchImpl,
+  });
+
+  const getInstagramConnections = (userId, workspaceId) => database.prepare(`
+    SELECT c.id, c.account_id AS accountId, 'instagram' AS networkId,
+      c.provider_account_id AS providerAccountId, c.status, c.expires_at AS expiresAt,
+      c.granted_scopes_json AS grantedScopes, c.verified_at AS verifiedAt,
+      c.page_id AS pageId, c.page_name AS pageName, c.username,
+      a.name, c.workspace_id AS workspaceId, c.brand_id AS brandId
+    FROM instagram_connections c
+    JOIN social_accounts a ON a.user_id = c.user_id AND a.id = c.account_id
+    WHERE c.user_id = ? AND c.workspace_id = ?
+    ORDER BY a.name, c.id
+  `).all(userId, workspaceId).map((connection) => ({
+    ...connection,
+    status: connection.expiresAt && connection.expiresAt <= Date.now() ? 'expired' : connection.status,
+    grantedScopes: JSON.parse(connection.grantedScopes),
+  }));
+
   app.get('/api/connections', requireSession, (request, response) => {
     ensureUserWorkspace(request.user.id);
     const workspaceId = getActiveWorkspaceId(request.user.id);
@@ -2014,7 +1793,8 @@ export function createApp({
     const youtubeConnections = database.prepare(`
       SELECT c.id, c.account_id AS accountId, 'youtube' AS networkId,
         c.provider_channel_id AS providerAccountId, c.status,
-        c.granted_scopes_json AS grantedScopes, a.name, a.brand_id AS brandId
+        c.granted_scopes_json AS grantedScopes, c.custom_url AS customUrl,
+        c.verified_at AS verifiedAt, a.name, a.brand_id AS brandId
       FROM youtube_connections c
       JOIN social_accounts a ON a.user_id = c.user_id AND a.id = c.account_id
       WHERE c.user_id = ? AND c.workspace_id = ?
@@ -2023,7 +1803,7 @@ export function createApp({
       ...connection,
       grantedScopes: JSON.parse(connection.grantedScopes),
     }));
-    const connections = [...facebookConnections, ...youtubeConnections];
+    const connections = [...facebookConnections, ...youtubeConnections, ...getInstagramConnections(request.user.id, workspaceId)];
     response.json({ connections });
   });
 
@@ -2053,6 +1833,7 @@ export function createApp({
       WHERE c.user_id = ? AND c.workspace_id = ?
         AND (? IS NULL OR c.brand_id = ?)
         AND c.status = 'connected'
+        AND c.last_error_code IS NULL
         AND (c.expires_at IS NULL OR c.expires_at > ?)
     `).get(request.user.id, workspaceId, brandId, brandId, Date.now()).count;
     const youtubeConnections = database.prepare(`
@@ -2065,12 +1846,15 @@ export function createApp({
         AND (? IS NULL OR c.brand_id = ?)
         AND c.status = 'connected'
     `).get(request.user.id, workspaceId, brandId, brandId).count;
-    response.json({
-      workspaceId,
-      brandId,
-      registeredAccounts,
-      officialConnections: facebookConnections + youtubeConnections,
-    });
+    const instagramConnections = database.prepare(`
+      SELECT COUNT(*) AS count FROM instagram_connections c
+      JOIN social_accounts a ON a.user_id = c.user_id AND a.id = c.account_id
+        AND a.workspace_id = c.workspace_id AND a.brand_id = c.brand_id
+      WHERE c.user_id = ? AND c.workspace_id = ? AND (? IS NULL OR c.brand_id = ?)
+        AND c.status = 'connected' AND (c.expires_at IS NULL OR c.expires_at > ?)
+    `).get(request.user.id, workspaceId, brandId, brandId, Date.now()).count;
+    response.json({ workspaceId, brandId, registeredAccounts,
+      officialConnections: facebookConnections + youtubeConnections + instagramConnections });
   });
 
   app.patch('/api/connections/:connectionId', requireSession, (request, response) => {
@@ -2086,7 +1870,10 @@ export function createApp({
     const youtubeConnection = connection ? null : database.prepare(`
       SELECT account_id AS accountId FROM youtube_connections WHERE id = ? AND user_id = ?
     `).get(request.params.connectionId, request.user.id);
-    const target = connection || youtubeConnection;
+    const instagramConnection = connection || youtubeConnection ? null : database.prepare(`
+      SELECT account_id AS accountId FROM instagram_connections WHERE id = ? AND user_id = ?
+    `).get(request.params.connectionId, request.user.id);
+    const target = connection || youtubeConnection || instagramConnection;
     if (!target) return jsonError(response, 404, 'No se encontró la conexión solicitada.');
     database.transaction(() => {
       if (connection) {
@@ -2094,9 +1881,14 @@ export function createApp({
           UPDATE social_connections SET workspace_id = ?, brand_id = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ? AND user_id = ?
         `).run(workspaceId, brandId, request.params.connectionId, request.user.id);
-      } else {
+      } else if (youtubeConnection) {
         database.prepare(`
           UPDATE youtube_connections SET workspace_id = ?, brand_id = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?
+        `).run(workspaceId, brandId, request.params.connectionId, request.user.id);
+      } else {
+        database.prepare(`
+          UPDATE instagram_connections SET workspace_id = ?, brand_id = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ? AND user_id = ?
         `).run(workspaceId, brandId, request.params.connectionId, request.user.id);
       }
@@ -2113,7 +1905,10 @@ export function createApp({
     const youtubeConnection = connection ? null : database.prepare(`
       SELECT account_id AS accountId FROM youtube_connections WHERE id = ? AND user_id = ? AND workspace_id = ?
     `).get(request.params.connectionId, request.user.id, getActiveWorkspaceId(request.user.id));
-    const target = connection || youtubeConnection;
+    const instagramConnection = connection || youtubeConnection ? null : database.prepare(`
+      SELECT account_id AS accountId FROM instagram_connections WHERE id = ? AND user_id = ? AND workspace_id = ?
+    `).get(request.params.connectionId, request.user.id, getActiveWorkspaceId(request.user.id));
+    const target = connection || youtubeConnection || instagramConnection;
     if (!target) return jsonError(response, 404, 'No se encontró la conexión del espacio activo.');
     database.prepare('DELETE FROM social_accounts WHERE id = ? AND user_id = ?')
       .run(target.accountId, request.user.id);
@@ -2125,6 +1920,7 @@ export function createApp({
     response.json({
       workspaces: getWorkspaceList(request.user.id),
       activeWorkspaceId: getActiveWorkspaceId(request.user.id),
+      activeBrandId: getActiveBrandId(request.user.id, getActiveWorkspaceId(request.user.id)),
     });
   });
 
@@ -2156,7 +1952,23 @@ export function createApp({
       INSERT INTO user_workspace_settings (user_id, active_workspace_id) VALUES (?, ?)
       ON CONFLICT(user_id) DO UPDATE SET active_workspace_id = excluded.active_workspace_id
     `).run(request.user.id, workspace.id);
-    response.json({ activeWorkspaceId: workspace.id });
+    response.json({ activeWorkspaceId: workspace.id, activeBrandId: getActiveBrandId(request.user.id, workspace.id) });
+  });
+
+  app.put('/api/workspaces/:workspaceId/active-brand', requireSession, (request, response) => {
+    const workspaceId = request.params.workspaceId;
+    if (!database.prepare('SELECT 1 FROM workspaces WHERE id = ? AND user_id = ?').get(workspaceId, request.user.id)) {
+      return jsonError(response, 404, 'No se encontró el espacio solicitado.');
+    }
+    const brandId = request.body?.brandId;
+    if (brandId !== null && (!validText(brandId, 150)
+      || !database.prepare('SELECT 1 FROM brands WHERE id = ? AND workspace_id = ?').get(brandId, workspaceId))) {
+      return jsonError(response, 400, 'Selecciona una marca de este espacio o ninguna marca.');
+    }
+    database.prepare(`INSERT INTO workspace_brand_selections (user_id, workspace_id, brand_id) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, workspace_id) DO UPDATE SET brand_id = excluded.brand_id`)
+      .run(request.user.id, workspaceId, brandId);
+    response.json({ workspaceId, activeBrandId: brandId });
   });
 
   app.patch('/api/workspaces/:workspaceId', requireSession, (request, response) => {
@@ -2241,6 +2053,11 @@ export function createApp({
     if (brands.length === 1) return jsonError(response, 409, 'Conserva al menos una marca en el espacio.');
     const replacementBrandId = brands.find(({ id }) => id !== brand.id).id;
     database.transaction(() => {
+      for (const table of ['social_connections', 'youtube_connections', 'instagram_connections']) {
+        database.prepare(`UPDATE ${table} SET brand_id = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE user_id = ? AND workspace_id = ? AND brand_id = ?`)
+          .run(replacementBrandId, request.user.id, brand.workspaceId, brand.id);
+      }
       database.prepare('UPDATE social_accounts SET brand_id = ? WHERE user_id = ? AND workspace_id = ? AND brand_id = ?')
         .run(replacementBrandId, request.user.id, brand.workspaceId, brand.id);
       database.prepare('UPDATE posts SET brand_id = ? WHERE user_id = ? AND workspace_id = ? AND brand_id = ?')
@@ -2339,17 +2156,21 @@ export function createApp({
     const workspaceId = getActiveWorkspaceId(request.user.id);
     const facebookAccounts = database.prepare(`
       SELECT account_id AS accountId, id AS connectionId, status AS connectionStatus,
-        expires_at AS expiresAt, granted_scopes_json AS grantedScopes,
+        expires_at AS expiresAt, granted_scopes_json AS grantedScopes, verified_at AS verifiedAt, last_error_code AS verificationError,
         network_id AS connectionNetwork, provider_account_id AS providerAccountId
       FROM social_connections WHERE user_id = ? AND workspace_id = ?
     `).all(request.user.id, workspaceId);
     const youtubeAccounts = database.prepare(`
       SELECT account_id AS accountId, id AS connectionId, status AS connectionStatus,
         granted_scopes_json AS grantedScopes, 'youtube' AS connectionNetwork,
-        provider_channel_id AS providerAccountId
+        provider_channel_id AS providerAccountId, custom_url AS customUrl, verified_at AS verifiedAt
       FROM youtube_connections WHERE user_id = ? AND workspace_id = ?
     `).all(request.user.id, workspaceId);
-    const connectedAccounts = new Map([...facebookAccounts, ...youtubeAccounts]
+    const instagramAccounts = getInstagramConnections(request.user.id, workspaceId).map((connection) => ({
+      ...connection, connectionId: connection.id, connectionStatus: connection.status,
+      connectionNetwork: 'instagram', grantedScopes: JSON.stringify(connection.grantedScopes),
+    }));
+    const connectedAccounts = new Map([...facebookAccounts, ...youtubeAccounts, ...instagramAccounts]
       .map((connection) => [connection.accountId, connection]));
     const accounts = database.prepare(`
       SELECT id, name, network_id AS networkId, status,
@@ -2367,22 +2188,46 @@ export function createApp({
           connectionNetwork: connection?.connectionNetwork || null,
           providerAccountId: connection?.providerAccountId || null,
           expiresAt: connection?.expiresAt || null,
+          verifiedAt: connection?.verifiedAt || null,
+          verificationError: connection?.verificationError || null,
+          ...(connection?.connectionNetwork === 'instagram' ? {
+            verifiedAt: connection.verifiedAt, username: connection.username,
+            pageId: connection.pageId, pageName: connection.pageName,
+          } : {}),
+          ...(connection?.connectionNetwork === 'youtube' ? {
+            verifiedAt: connection.verifiedAt, customUrl: connection.customUrl,
+          } : {}),
           grantedScopes: connection ? JSON.parse(connection.grantedScopes) : [],
           preferenceEnabled: Boolean(account.preferenceEnabled),
         };
       });
     const posts = database.prepare(`
       SELECT id, text, title, description, hashtags, network_id AS networkId,
-        network_ids AS networkIds, network_content AS networkContent,
+        network_ids AS networkIds, network_content AS networkContent, account_ids AS accountIds,
         'draft' AS status, scheduled_at AS date, format, brand_id AS brandId
       FROM posts WHERE user_id = ? AND workspace_id = ?
     `).all(request.user.id, workspaceId)
       .map((post) => ({
         ...post,
         networkIds: JSON.parse(post.networkIds),
+        accountIds: JSON.parse(post.accountIds),
         networkContent: JSON.parse(post.networkContent),
       }));
-    response.json({ profile: request.user, accounts, posts, workspaceId });
+    const storedOrder = JSON.parse(database.prepare('SELECT account_ids_json AS ids FROM social_card_orders WHERE user_id = ? AND workspace_id = ?').get(request.user.id, workspaceId)?.ids || '[]');
+    const accountOrder = [...new Set([...storedOrder.filter((id) => accounts.some((account) => account.id === id)), ...accounts.map((account) => account.id)])];
+    response.json({ profile: request.user, accounts, posts, workspaceId, accountOrder, activeBrandId: getActiveBrandId(request.user.id, workspaceId) });
+  });
+
+  app.put('/api/workspaces/:workspaceId/account-order', requireSession, (request, response) => {
+    const workspaceId = request.params.workspaceId;
+    if (!database.prepare('SELECT 1 FROM workspaces WHERE id = ? AND user_id = ?').get(workspaceId, request.user.id)) return jsonError(response, 404, 'No se encontró el espacio.');
+    const ids = request.body?.accountIds;
+    const owned = database.prepare('SELECT id FROM social_accounts WHERE user_id = ? AND workspace_id = ?').all(request.user.id, workspaceId).map((row) => row.id);
+    if (!Array.isArray(ids) || ids.length > 1000 || new Set(ids).size !== ids.length || ids.some((id) => typeof id !== 'string' || !owned.includes(id))) return jsonError(response, 400, 'El orden debe contener cuentas propias del espacio, sin duplicados.');
+    const order = [...ids, ...owned.filter((id) => !ids.includes(id))];
+    database.prepare('INSERT INTO social_card_orders (user_id, workspace_id, account_ids_json) VALUES (?, ?, ?) ON CONFLICT(user_id, workspace_id) DO UPDATE SET account_ids_json = excluded.account_ids_json')
+      .run(request.user.id, workspaceId, JSON.stringify(order));
+    response.json({ accountOrder: order });
   });
 
   app.put('/api/data/profile', (request, response) => {
@@ -2400,6 +2245,10 @@ export function createApp({
     const existing = database.prepare('SELECT workspace_id AS workspaceId FROM social_accounts WHERE user_id = ? AND id = ?')
       .get(request.user.id, account.id);
     if (existing && existing.workspaceId !== workspaceId) return jsonError(response, 404, 'No se encontró la cuenta solicitada.');
+    const officialConnection = ['social_connections', 'youtube_connections', 'instagram_connections']
+      .some((table) => database.prepare(`SELECT 1 FROM ${table} WHERE account_id = ? AND user_id = ?`)
+        .get(account.id, request.user.id));
+    if (officialConnection) return jsonError(response, 409, 'Usa las opciones de la conexión oficial para reasignarla o reconectarla.');
     const brandId = request.body?.brandId
       || database.prepare('SELECT id FROM brands WHERE workspace_id = ? ORDER BY created_at, id LIMIT 1').get(workspaceId)?.id;
     if (!brandId || !database.prepare('SELECT id FROM brands WHERE id = ? AND workspace_id = ?').get(brandId, workspaceId)) {
@@ -2426,7 +2275,7 @@ export function createApp({
     if (!post) return jsonError(response, 400, 'Solo se pueden guardar borradores con datos válidos.');
     ensureUserWorkspace(request.user.id);
     const workspaceId = getActiveWorkspaceId(request.user.id);
-    const existing = database.prepare('SELECT workspace_id AS workspaceId FROM posts WHERE user_id = ? AND id = ?')
+    const existing = database.prepare('SELECT workspace_id AS workspaceId, brand_id AS brandId, account_ids AS accountIds FROM posts WHERE user_id = ? AND id = ?')
       .get(request.user.id, post.id);
     if (existing && existing.workspaceId !== workspaceId) return jsonError(response, 404, 'No se encontró el borrador solicitado.');
     const brandId = post.brandId || database.prepare('SELECT brand_id AS brandId FROM posts WHERE user_id = ? AND id = ?')
@@ -2436,15 +2285,30 @@ export function createApp({
     if (!database.prepare('SELECT id FROM brands WHERE id = ? AND workspace_id = ?').get(brandId, workspaceId)) {
       return jsonError(response, 404, 'No se encontró la marca solicitada en este espacio.');
     }
+    const unchangedDestinations = existing?.brandId === brandId && post.accountIds.every((id) => JSON.parse(existing.accountIds).includes(id));
+    // Editing a private draft must remain possible if an earlier destination expires
+    // or is disconnected. New destinations always require current verified access.
+    if (post.accountIds.length && !unchangedDestinations) {
+      const destinationNetworks = new Set();
+      for (const id of post.accountIds) {
+        const account = database.prepare('SELECT network_id AS network FROM social_accounts WHERE id = ? AND user_id = ? AND workspace_id = ? AND brand_id = ?').get(id, request.user.id, workspaceId, brandId);
+        const table = { facebook: 'social_connections', youtube: 'youtube_connections', instagram: 'instagram_connections' }[account?.network];
+        const connection = table && database.prepare(`SELECT * FROM ${table} WHERE account_id = ? AND user_id = ? AND workspace_id = ? AND brand_id = ?`).get(id, request.user.id, workspaceId, brandId);
+        if (!connection || connection.status !== 'connected' || !connection.verified_at || connection.last_error_code || (connection.expires_at && connection.expires_at <= Date.now())) return jsonError(response, 400, 'Selecciona únicamente cuentas oficiales verificadas de la marca y espacio del borrador.');
+        destinationNetworks.add(account.network);
+      }
+      if (post.networkIds.length !== destinationNetworks.size || post.networkIds.some((network) => !destinationNetworks.has(network))) return jsonError(response, 400, 'Las redes no coinciden con las cuentas seleccionadas.');
+    }
     database.prepare(`
       INSERT INTO posts (
-        id, user_id, text, title, description, hashtags, network_id, network_ids, network_content,
+        id, user_id, text, title, description, hashtags, network_id, network_ids, network_content, account_ids,
         status, scheduled_at, workspace_id, brand_id, format
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)
       ON CONFLICT(user_id, id) DO UPDATE SET text = excluded.text, title = excluded.title,
         description = excluded.description, hashtags = excluded.hashtags, network_id = excluded.network_id,
         network_ids = excluded.network_ids, network_content = excluded.network_content,
+        account_ids = excluded.account_ids,
         scheduled_at = excluded.scheduled_at, status = 'draft',
         brand_id = excluded.brand_id, format = excluded.format
     `).run(
@@ -2457,6 +2321,7 @@ export function createApp({
       post.networkId,
       JSON.stringify(post.networkIds),
       JSON.stringify(post.networkContent),
+      JSON.stringify(post.accountIds),
       post.date,
       workspaceId,
       brandId,

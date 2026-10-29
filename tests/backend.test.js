@@ -1187,6 +1187,11 @@ test('Facebook OAuth state is session-bound and page tokens are encrypted and is
       payload = url.searchParams.has('fb_exchange_token')
         ? { access_token: 'facebook-long-user-token', expires_in: 5_184_000 }
         : { access_token: 'facebook-short-user-token', expires_in: 3600 };
+    } else if (url.pathname.endsWith('/debug_token')) {
+      payload = { data: { is_valid: true, app_id: 'test-facebook-app', type: 'PAGE', expires_at: 0, scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'business_management'] } };
+    } else if (/\/page-[123]$/.test(url.pathname)) {
+      const id = url.pathname.split('/').at(-1);
+      payload = { id, name: { 'page-1': 'Primera página', 'page-2': 'Segunda página', 'page-3': 'Tercera página' }[id] };
     } else if (url.pathname.endsWith('/me/businesses')) {
       if (businessDiscoveryMode === 'denied') {
         return new Response(JSON.stringify({

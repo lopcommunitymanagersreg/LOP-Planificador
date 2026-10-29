@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import AuthScreen from './AuthScreen.jsx';
+import GoogleMark from './GoogleMark.jsx';
 import { apiRequest } from './api.js';
 
 const networks = [
@@ -11,6 +12,7 @@ const networks = [
   { id: 'linkedin', name: 'LinkedIn', mark: 'in', className: 'linkedin' },
   { id: 'x', name: 'X', mark: 'X', className: 'x' },
 ];
+const verifiableConnectionNetworks = new Set(['facebook', 'instagram', 'youtube']);
 
 const navigation = [
   { id: 'Inicio', icon: '⌂' },
@@ -141,12 +143,19 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
   const [facebookConnectionMissing, setFacebookConnectionMissing] = useState([]);
   const [youtubeConnectionAvailable, setYoutubeConnectionAvailable] = useState(false);
   const [youtubeConnectionMissing, setYoutubeConnectionMissing] = useState([]);
+  const [instagramConnectionAvailable, setInstagramConnectionAvailable] = useState(false);
+  const [instagramConnectionMissing, setInstagramConnectionMissing] = useState([]);
   const [facebookPageAssignments, setFacebookPageAssignments] = useState({});
   const [facebookPageSelectionError, setFacebookPageSelectionError] = useState('');
   const [savingFacebookPages, setSavingFacebookPages] = useState(false);
   const [youtubeChannelAssignments, setYoutubeChannelAssignments] = useState({});
   const [youtubeChannelSelectionError, setYoutubeChannelSelectionError] = useState('');
   const [savingYoutubeChannels, setSavingYoutubeChannels] = useState(false);
+  const [instagramAccountAssignments, setInstagramAccountAssignments] = useState({});
+  const [instagramAccountSelectionError, setInstagramAccountSelectionError] = useState('');
+  const [savingInstagramAccounts, setSavingInstagramAccounts] = useState(false);
+  const [verifyingConnectionId, setVerifyingConnectionId] = useState(null);
+  const [verificationFeedback, setVerificationFeedback] = useState(null);
   const [accountSummary, setAccountSummary] = useState({ registeredAccounts: 0, officialConnections: 0 });
   const [accountSummaryVersion, setAccountSummaryVersion] = useState(0);
   const [theme, setTheme] = useState('light');
@@ -202,15 +211,25 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
   const [draftHashtags, setDraftHashtags] = useState('');
   const [draftNetworkContent, setDraftNetworkContent] = useState({});
   const [draftDate, setDraftDate] = useState(() => toDateInput(dateAtOffset(1)));
-  const [draftNetworks, setDraftNetworks] = useState([]);
+  const [draftAccountIds, setDraftAccountIds] = useState([]);
+  const [composerError, setComposerError] = useState('');
   const [draftFormat, setDraftFormat] = useState('text');
   const [draftUndated, setDraftUndated] = useState(false);
   const [draftFileName, setDraftFileName] = useState('');
   const [accountDisplayName, setAccountDisplayName] = useState('');
   const [workspaces, setWorkspaces] = useState(initialWorkspaces);
-  const [activeBrandId, setActiveBrandId] = useState(
-    initialWorkspaces.find((item) => item.id === initialData.workspaceId)?.brands[0]?.id || '',
+  const [activeBrandId, setActiveBrandIdState] = useState(
+    initialData.activeBrandId === undefined
+      ? initialWorkspaces.find((item) => item.id === initialData.workspaceId)?.brands[0]?.id || ''
+      : initialData.activeBrandId || '',
   );
+  const brandSelectionQueue = useRef(Promise.resolve());
+  const brandSelectionVersion = useRef(0);
+  const persistedBrandId = useRef(initialData.activeBrandId === undefined
+    ? initialWorkspaces.find((item) => item.id === initialData.workspaceId)?.brands[0]?.id || ''
+    : initialData.activeBrandId || '');
+  const [savingBrandSelection, setSavingBrandSelection] = useState(false);
+  const [brandSelectionError, setBrandSelectionError] = useState('');
   const [draftBrandId, setDraftBrandId] = useState(
     initialWorkspaces.find((item) => item.id === initialData.workspaceId)?.brands[0]?.id || '',
   );
@@ -227,7 +246,22 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
   const { accounts, posts } = activeUserData;
   const activeWorkspace = workspaces.find((item) => item.id === initialData.workspaceId);
   const activeBrand = activeWorkspace?.brands.find((item) => item.id === activeBrandId);
-  const brandAccounts = accounts.filter((account) => account.brandId === activeBrandId);
+  const brandAccounts = accounts.filter((account) => !activeBrandId || account.brandId === activeBrandId);
+  const [accountOrder, setAccountOrder] = useState(initialData.accountOrder || initialData.accounts.map((account) => account.id));
+  const [draggedAccountId, setDraggedAccountId] = useState(null);
+  const [accountOrderError, setAccountOrderError] = useState('');
+  const accountOrderQueue = useRef(Promise.resolve());
+  const persistedAccountOrder = useRef(initialData.accountOrder || initialData.accounts.map((account) => account.id));
+  const accountOrderVersion = useRef(0);
+  const connectedCards = brandAccounts.filter((account) => account.connectionId).sort((a, b) => {
+    const rank = (id) => accountOrder.includes(id) ? accountOrder.indexOf(id) : accountOrder.length + accounts.findIndex((account) => account.id === id);
+    return rank(a.id) - rank(b.id);
+  });
+  const draftConnectedAccounts = accounts.filter((account) => account.connectionId && account.status === 'connected'
+    && account.verifiedAt && !account.verificationError && account.brandId === draftBrandId && account.workspaceId === initialData.workspaceId);
+  const selectedDraftAccounts = draftConnectedAccounts.filter((account) => draftAccountIds.includes(account.id));
+  const draftNetworks = [...new Set(selectedDraftAccounts.map((account) => account.networkId))];
+  const composerFormats = draftNetworks.includes('youtube') ? ['video'] : draftNetworks.includes('instagram') ? ['image', 'video', 'carousel'] : Object.keys(formatOptionsByType);
   const brandTimezoneValue = activeBrand?.settings?.timezone || 'America/Mexico_City';
   const getBrandTimezone = (brandId) => activeWorkspace?.brands.find((brand) => brand.id === brandId)?.settings?.timezone || brandTimezoneValue;
   const calendarBrandId = calendarFilters.brandId || activeBrandId;
@@ -255,15 +289,83 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
     if (notificationsEnabled) setNotification(message);
   };
 
+  const setActiveBrandId = (brandId) => {
+    const nextId = brandId || '';
+    const version = ++brandSelectionVersion.current;
+    setActiveBrandIdState(nextId);
+    setBrandSelectionError('');
+    setSavingBrandSelection(true);
+    brandSelectionQueue.current = brandSelectionQueue.current.catch(() => {}).then(async () => {
+      try {
+        await apiRequest(`/workspaces/${encodeURIComponent(initialData.workspaceId)}/active-brand`, {
+          method: 'PUT', keepalive: true, body: JSON.stringify({ brandId: nextId || null }),
+        });
+        persistedBrandId.current = nextId;
+      } catch (error) {
+        if (version === brandSelectionVersion.current) {
+          setActiveBrandIdState(persistedBrandId.current);
+          setBrandSelectionError(`No se pudo guardar la selección de marca: ${error.message}`);
+        }
+      } finally {
+        if (version === brandSelectionVersion.current) setSavingBrandSelection(false);
+      }
+    });
+    return brandSelectionQueue.current;
+  };
+
+  const renderVerificationFeedback = (account) => verificationFeedback?.connectionId === account.connectionId && (
+    <div className={`connection-feedback ${verificationFeedback.state}`} role={verificationFeedback.state === 'error' ? 'alert' : 'status'} aria-live="polite" aria-atomic="true">
+      <strong>{verificationFeedback.state === 'checking' ? 'Verificando conexión…'
+        : verificationFeedback.state === 'success' ? 'Conexión verificada'
+          : verificationFeedback.state === 'warning' ? 'Revisa la conexión' : 'No se pudo verificar la conexión'}</strong>
+      <span>{verificationFeedback.message}</span>
+    </div>
+  );
+
+  const reorderAccount = (sourceId, targetId) => {
+    if (sourceId === targetId || !connectedCards.some((account) => account.id === sourceId) || !connectedCards.some((account) => account.id === targetId)) return;
+    const order = [...new Set([...accountOrder.filter((id) => accounts.some((account) => account.id === id)), ...accounts.map((account) => account.id)])];
+    const targetIndex = order.indexOf(targetId);
+    order.splice(order.indexOf(sourceId), 1);
+    order.splice(targetIndex, 0, sourceId);
+    const version = ++accountOrderVersion.current;
+    setAccountOrder(order); setAccountOrderError(''); setDraggedAccountId(null);
+    accountOrderQueue.current = accountOrderQueue.current.catch(() => {}).then(async () => {
+      try {
+        const result = await apiRequest(`/workspaces/${encodeURIComponent(initialData.workspaceId)}/account-order`, { method: 'PUT', keepalive: true, body: JSON.stringify({ accountIds: order }) });
+        persistedAccountOrder.current = result.accountOrder;
+      } catch (error) {
+        if (version === accountOrderVersion.current) { setAccountOrder(persistedAccountOrder.current); setAccountOrderError(`No se pudo guardar el orden: ${error.message}`); }
+      }
+    });
+  };
+
   useEffect(() => {
-    if (!activeBrandId) {
-      setAccountSummary({ registeredAccounts: 0, officialConnections: 0 });
-      return undefined;
-    }
+    if (!composerFormats.includes(draftFormat)) setDraftFormat(composerFormats[0]);
+  }, [draftNetworks.join('|'), draftFormat]);
+
+  useEffect(() => {
+    if (!showComposer) return undefined;
+    let current = true;
+    const refresh = async () => {
+      try {
+        const latest = await apiRequest('/data');
+        if (!current || latest.workspaceId !== initialData.workspaceId) return;
+        persistedData.current.accounts = latest.accounts;
+        desiredData.current.accounts = latest.accounts;
+        setAccounts(latest.accounts);
+      } catch (error) { if (current) setComposerError(`No se pudo actualizar las cuentas: ${error.message}`); }
+    };
+    window.addEventListener('focus', refresh);
+    const interval = window.setInterval(refresh, 15000);
+    return () => { current = false; window.removeEventListener('focus', refresh); window.clearInterval(interval); };
+  }, [showComposer, initialData.workspaceId]);
+
+  useEffect(() => {
     let current = true;
     const query = new URLSearchParams({
       workspaceId: initialData.workspaceId,
-      brandId: activeBrandId,
+      ...(activeBrandId ? { brandId: activeBrandId } : {}),
     });
     apiRequest(`/connections/summary?${query}`)
       .then((summary) => {
@@ -280,11 +382,13 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       .then(({ google }) => setGoogleEnabled(Boolean(google)))
       .catch((error) => notify(`No se pudo comprobar la configuración de Google: ${error.message}`));
     apiRequest('/connections/methods')
-      .then(({ facebook, youtube }) => {
+      .then(({ facebook, youtube, instagram }) => {
         setFacebookConnectionAvailable(Boolean(facebook?.available));
         setFacebookConnectionMissing(facebook?.missing || []);
         setYoutubeConnectionAvailable(Boolean(youtube?.available));
         setYoutubeConnectionMissing(youtube?.missing || []);
+        setInstagramConnectionAvailable(Boolean(instagram?.available));
+        setInstagramConnectionMissing(instagram?.missing || []);
       })
       .catch((error) => notify(`No se pudo comprobar la configuración de conexiones: ${error.message}`));
     const authResult = new URLSearchParams(window.location.search).get('auth');
@@ -323,15 +427,33 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       setDialog({ type: 'facebook-page-selection', selection });
     };
     const openYoutubeSelection = (selection) => {
-      const defaultWorkspaceId = initialData.workspaceId;
-      const defaultBrandId = initialWorkspaces.find((item) => item.id === defaultWorkspaceId)?.brands[0]?.id || '';
+      const defaultWorkspaceId = selection.workspaceId || initialData.workspaceId;
+      const defaultBrandId = selection.brandId
+        || initialWorkspaces.find((item) => item.id === defaultWorkspaceId)?.brands[0]?.id || '';
       const defaults = Object.fromEntries(selection.channels.map((channel) => [channel.id, {
         selected: false,
         workspaceId: defaultWorkspaceId,
         brandId: defaultBrandId,
       }]));
       setYoutubeChannelAssignments(defaults);
+      setYoutubeChannelSelectionError('');
+      setActivePage('Cuentas sociales');
+      if (defaultWorkspaceId === initialData.workspaceId) setActiveBrandId(defaultBrandId);
       setDialog({ type: 'youtube-channel-selection', selection });
+    };
+    const openInstagramSelection = (selection) => {
+      const defaultWorkspaceId = selection.workspaceId || initialData.workspaceId;
+      const defaultBrandId = selection.brandId
+        || initialWorkspaces.find((item) => item.id === defaultWorkspaceId)?.brands[0]?.id || '';
+      setInstagramAccountAssignments(Object.fromEntries(selection.accounts.map((account) => [account.id, {
+        selected: false,
+        workspaceId: defaultWorkspaceId,
+        brandId: defaultBrandId,
+      }])));
+      setInstagramAccountSelectionError('');
+      setActivePage('Cuentas sociales');
+      if (defaultWorkspaceId === initialData.workspaceId) setActiveBrandId(defaultBrandId);
+      setDialog({ type: 'instagram-account-selection', selection });
     };
     const errorMessages = {
       cancelled: 'Cancelaste la autorización de Facebook.',
@@ -350,8 +472,25 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       'session-expired': 'La sesión local venció durante la autorización. Inicia sesión de nuevo.',
       'not-configured': 'La conexión requiere las credenciales OAuth de Google y la clave local de cifrado.',
       'no-channels': 'Google autorizó la cuenta, pero no devolvió canales de YouTube administrables.',
-      'refresh-token-required': 'Google no devolvió autorización renovable. Retira LOP de las conexiones de tu cuenta Google y vuelve a autorizar.',
+      'api-disabled': 'Activa YouTube Data API v3 en el proyecto de Google usado por LOP y vuelve a conectar YouTube.',
+      'permissions-missing': 'Google no concedió el permiso de lectura de YouTube. Usa «Conectar YouTube» de nuevo y revisa los permisos solicitados.',
+      'invalid-client': 'Google rechazó la configuración OAuth de YouTube. Comprueba que el ID y el secreto correspondan al mismo cliente web.',
+      'redirect-mismatch': 'La URI de retorno de YouTube no coincide con la registrada en el cliente OAuth de Google.',
+      'access-denied': 'Google no permitió autorizar YouTube. Comprueba que la cuenta tenga acceso a la aplicación y vuelve a intentarlo.',
+      'refresh-token-required': 'Google no devolvió autorización renovable. Usa «Conectar YouTube» de nuevo y acepta el consentimiento para mantener el acceso al canal.',
+      'token-invalid': 'Google no pudo validar la autorización de YouTube. Usa «Conectar YouTube» de nuevo.',
       'provider-error': 'Google rechazó o no pudo completar la conexión de YouTube.',
+    };
+    const instagramErrorMessages = {
+      cancelled: 'Cancelaste la autorización de Instagram.',
+      'invalid-state': 'No se pudo validar el retorno de Instagram. Inicia de nuevo la conexión.',
+      'state-expired': 'La autorización de Instagram venció. Inicia de nuevo la conexión.',
+      'session-expired': 'La sesión local venció durante la autorización de Instagram. Inicia sesión de nuevo.',
+      'not-configured': 'La conexión de Instagram necesita completar la configuración de Meta.',
+      'permissions-missing': 'Meta no concedió todos los permisos necesarios para conectar Instagram. Vuelve a autorizar y revisa los permisos.',
+      'no-professional-accounts': 'Meta no devolvió cuentas profesionales de Instagram. Comprueba que tu cuenta Business o Creator esté vinculada a una página de Facebook que puedas administrar.',
+      'token-invalid': 'Meta no pudo validar la autorización de Instagram. Inicia de nuevo la conexión.',
+      'provider-error': 'Meta rechazó o no pudo completar la conexión de Instagram. Vuelve a intentarlo.',
     };
     const showOAuthFailure = async () => {
       let event = null;
@@ -392,8 +531,43 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       }
       return false;
     };
+    const recoverPendingInstagramSelection = async () => {
+      const { pending } = await apiRequest('/connections/instagram/selections/pending');
+      if (pending.length) {
+        openInstagramSelection(pending[0]);
+        setNotification('Se recuperó una selección pendiente de Instagram. Elige las cuentas profesionales que deseas conectar.');
+        return true;
+      }
+      return false;
+    };
     const handleFacebookReturn = async () => {
       try {
+        if (connectionResult === 'instagram-select') {
+          const selectionId = connectionQuery.get('selection');
+          if (selectionId) {
+            try {
+              const { selection } = await apiRequest(`/connections/instagram/selections/${encodeURIComponent(selectionId)}`);
+              openInstagramSelection(selection);
+              clearConnectionQuery();
+              return;
+            } catch (error) {
+              setNotification(`No se pudo cargar la selección indicada (${error.message}). Se buscarán selecciones aún vigentes.`);
+            }
+          }
+          if (await recoverPendingInstagramSelection()) {
+            clearConnectionQuery();
+            return;
+          }
+          setNotification((message) => message || 'No hay una selección vigente de Instagram. Inicia de nuevo la conexión.');
+          return;
+        }
+        if (connectionResult === 'instagram-error') {
+          setActivePage('Cuentas sociales');
+          setNotification(instagramErrorMessages[connectionQuery.get('reason')]
+            || 'No se pudo completar la conexión oficial de Instagram.');
+          clearConnectionQuery();
+          return;
+        }
         if (connectionResult === 'youtube-select') {
           const selectionId = connectionQuery.get('selection');
           if (selectionId) {
@@ -414,6 +588,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
           return;
         }
         if (connectionResult === 'youtube-error') {
+          setActivePage('Cuentas sociales');
           setNotification(youtubeErrorMessages[connectionQuery.get('reason')]
             || 'No se pudo completar la conexión oficial de YouTube.');
           clearConnectionQuery();
@@ -464,9 +639,11 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
           await showOAuthFailure();
           return;
         }
-        if (!(await recoverPendingSelection())) await recoverPendingYouTubeSelection();
+        if (!(await recoverPendingSelection()) && !(await recoverPendingYouTubeSelection())) {
+          await recoverPendingInstagramSelection();
+        }
       } catch (error) {
-        setNotification(`No se pudo recuperar el resultado de Facebook: ${error.message}. El resultado temporal se conservará; vuelve a cargar la página para reintentarlo.`);
+        setNotification(`No se pudo recuperar el resultado de la conexión: ${error.message}. El resultado temporal se conservará; vuelve a cargar la página para reintentarlo.`);
       }
     };
     void handleFacebookReturn();
@@ -575,7 +752,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
   );
 
   useEffect(() => {
-    if (activePage !== 'Calendario' || !activeBrandId || !activeWorkspace) return undefined;
+    if (activePage !== 'Calendario' || !calendarBrandId || !activeWorkspace) return undefined;
     let active = true;
     const [year, month] = dateKeyInZone(calendarDate, calendarTimezoneValue).split('-').map(Number);
     const fromKey = new Date(Date.UTC(year, month - 1, 1)).toISOString().slice(0, 10);
@@ -752,6 +929,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
     };
     const handleEscape = (event) => {
       if (event.key !== 'Escape') return;
+      if (savingInstagramAccounts) return;
       setShowProfileMenu(false);
       setPostMenuId(null);
       setAccountMenuId(null);
@@ -767,7 +945,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       document.removeEventListener('pointerdown', handleOutsideClick);
       document.removeEventListener('keydown', handleEscape);
     };
-  }, []);
+  }, [savingInstagramAccounts]);
 
   const goToPage = (page) => {
     setActivePage(page);
@@ -781,22 +959,32 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
     setDraftDescription('');
     setDraftHashtags('');
     setDraftNetworkContent({});
-    setDraftNetworks([]);
+    setDraftAccountIds([]);
+    setComposerError('');
     setDraftFormat('text');
     setDraftUndated(undated);
-    setDraftBrandId(calendarBrandId);
+    setDraftBrandId(activeBrandId);
     setDraftFileName('');
-    setDraftDate(dateTimeInputInZone(date || dateAtOffset(1), getBrandTimezone(calendarBrandId)));
+    setDraftDate(dateTimeInputInZone(date || dateAtOffset(1), getBrandTimezone(activeBrandId)));
     setShowComposer(true);
   };
 
   const saveDraft = async (event) => {
     event.preventDefault();
+    setComposerError('');
+    if (draftAccountIds.some((id) => !draftConnectedAccounts.some((account) => account.id === id))) {
+      setComposerError('Una cuenta seleccionada ya no está disponible o verificada. Revisa la selección antes de guardar.');
+      return;
+    }
     if (!draftText.trim()) {
       notify('Escribe un texto para guardar el borrador.');
       return;
     }
 
+    if (!draftBrandId) {
+      notify('Selecciona una marca para guardar el borrador.');
+      return;
+    }
     const parsedDate = draftUndated ? null : dateFromZonedInput(draftDate, getBrandTimezone(draftBrandId));
     if (!draftUndated && (!parsedDate || Number.isNaN(parsedDate.getTime()))) {
       notify('Selecciona una fecha y hora válidas para esta marca.');
@@ -810,6 +998,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       hashtags: draftHashtags.trim(),
       networkId: draftNetworks[0] || null,
       networkIds: draftNetworks,
+      accountIds: draftAccountIds,
       networkContent: Object.fromEntries(draftNetworks.map((networkId) => [
         networkId,
         draftNetworkContent[networkId] || {},
@@ -837,11 +1026,6 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
     }
   };
 
-  const toggleDraftNetwork = (networkId) => {
-    setDraftNetworks((selected) => selected.includes(networkId)
-      ? selected.filter((id) => id !== networkId)
-      : [...selected, networkId]);
-  };
 
   const moveCalendar = (amount) => {
     const [year, month, day] = dateKeyInZone(calendarDate, calendarTimezoneValue).split('-').map(Number);
@@ -963,6 +1147,8 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
   const selectWorkspace = async (workspaceId) => {
     setWorkspaceError('');
     try {
+      await brandSelectionQueue.current;
+      await accountOrderQueue.current;
       await apiRequest('/workspaces/active', {
         method: 'PUT',
         body: JSON.stringify({ workspaceId }),
@@ -1010,7 +1196,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       setWorkspaces((items) => items.map((item) => item.id === initialData.workspaceId
         ? { ...item, brands: isNew ? [...item.brands, brand] : item.brands.map((existing) => existing.id === brand.id ? brand : existing) }
         : item));
-      if (isNew) setActiveBrandId(brand.id);
+      if (isNew) await setActiveBrandId(brand.id);
       setDialog(null);
       notify(isNew ? 'Marca guardada en SQLite.' : 'Marca actualizada.');
     } catch (error) {
@@ -1025,7 +1211,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       const result = await apiRequest('/workspaces');
       setWorkspaces(result.workspaces);
       const nextBrandId = result.workspaces.find((item) => item.id === initialData.workspaceId)?.brands[0]?.id || '';
-      setActiveBrandId(nextBrandId);
+      await setActiveBrandId(nextBrandId);
       setDialog(null);
       await onWorkspaceChange(initialData.workspaceId, result.workspaces);
       notify('Marca eliminada. Las cuentas y los borradores asociados se conservaron en otra marca del espacio.');
@@ -1095,6 +1281,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       date: parsedDate,
       networkId: editPostNetworks[0] || null,
       networkIds: editPostNetworks,
+      accountIds: (post.networkIds || []).join('|') === editPostNetworks.join('|') ? post.accountIds || [] : [],
       networkContent: Object.fromEntries(editPostNetworks.map((networkId) => [
         networkId,
         editPostNetworkContent[networkId] || {},
@@ -1171,6 +1358,54 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       notify('Conexión asignada al espacio y marca seleccionados.');
     } catch (error) {
       notify(`No se pudo reasignar la conexión: ${error.message}`);
+    }
+  };
+
+  const verifyConnection = async (account) => {
+    if (!account?.connectionId || !verifiableConnectionNetworks.has(account.connectionNetwork) || verifyingConnectionId) return;
+    const networkName = getNetwork(account.connectionNetwork)?.name || 'la red';
+    setVerifyingConnectionId(account.connectionId);
+    setAccountMenuId(null);
+    setVerificationFeedback({ connectionId: account.connectionId, state: 'checking', message: `Consultando ${networkName} y comprobando sus credenciales.` });
+    const reportVerification = (state, message) => {
+      setVerificationFeedback({ connectionId: account.connectionId, state, message });
+      setNotification(message);
+    };
+    const refreshAccounts = async () => {
+      setAccountSummaryVersion((version) => version + 1);
+      const latest = await apiRequest('/data');
+      persistedData.current.accounts = latest.accounts;
+      desiredData.current.accounts = latest.accounts;
+      setAccounts(latest.accounts);
+      const verifiedAccount = latest.accounts.find((item) => item.id === account.id);
+      setDialog((current) => current?.type === 'account-details' && current.account.id === account.id
+        ? verifiedAccount ? { ...current, account: verifiedAccount } : null
+        : current);
+    };
+    try {
+      const result = await apiRequest(`/connections/${encodeURIComponent(account.connectionId)}/verify`, { method: 'POST' });
+      try {
+        await refreshAccounts();
+      } catch (error) {
+        reportVerification('warning', `${result.message || 'La verificación terminó.'} No se pudo actualizar la lista: ${error.message}`);
+        return;
+      }
+      reportVerification(result.verified ? 'success' : 'error', result.message || (result.verified
+        ? `El proveedor confirmó que la conexión de ${networkName} sigue activa.`
+        : `La autorización de ${networkName} ya no está vigente. Vuelve a conectar la cuenta.`));
+    } catch (error) {
+      if (error.status === 409) {
+        try {
+          await refreshAccounts();
+          reportVerification('warning', 'La conexión cambió durante la verificación. Se actualizaron tus cuentas; vuelve a verificarla.');
+        } catch (refreshError) {
+          reportVerification('error', `La conexión cambió y no se pudo actualizar la lista: ${refreshError.message}`);
+        }
+      } else {
+        reportVerification('error', `No se pudo verificar la conexión de ${networkName}: ${error.message}`);
+      }
+    } finally {
+      setVerifyingConnectionId(null);
     }
   };
 
@@ -1302,6 +1537,73 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
     }
   };
 
+  const updateInstagramAccountAssignment = (accountId, changes) => {
+    setInstagramAccountAssignments((current) => ({
+      ...current,
+      [accountId]: { ...current[accountId], ...changes },
+    }));
+  };
+
+  const confirmInstagramAccountSelection = async () => {
+    if (dialog?.type !== 'instagram-account-selection' || savingInstagramAccounts) return;
+    const selectedAccounts = dialog.selection.accounts
+      .filter((account) => instagramAccountAssignments[account.id]?.selected)
+      .map((account) => ({
+        providerAccountId: account.id,
+        workspaceId: instagramAccountAssignments[account.id].workspaceId,
+        brandId: instagramAccountAssignments[account.id].brandId,
+      }));
+    if (!selectedAccounts.length) {
+      setInstagramAccountSelectionError('Selecciona al menos una cuenta profesional para conectar.');
+      return;
+    }
+    if (selectedAccounts.some((account) => !account.workspaceId || !account.brandId)) {
+      setInstagramAccountSelectionError('Asigna un espacio y una marca a cada cuenta seleccionada.');
+      return;
+    }
+    setSavingInstagramAccounts(true);
+    setInstagramAccountSelectionError('');
+    try {
+      const result = await apiRequest(
+        `/connections/instagram/selections/${encodeURIComponent(dialog.selection.id)}`,
+        { method: 'POST', body: JSON.stringify({ accounts: selectedAccounts }) },
+      );
+      setDialog(null);
+      setInstagramAccountAssignments({});
+      setAccountSummaryVersion((version) => version + 1);
+      try {
+        const latest = await apiRequest('/data');
+        persistedData.current.accounts = latest.accounts;
+        desiredData.current.accounts = latest.accounts;
+        setAccounts(latest.accounts);
+      } catch (error) {
+        notify(`Instagram guardó ${result.connectedCount} cuenta(s), pero no se pudo actualizar la lista: ${error.message}`);
+        return;
+      }
+      notify(`Se conectaron ${result.connectedCount} cuenta(s) profesionales de Instagram. No se ha publicado contenido.`);
+    } catch (error) {
+      setInstagramAccountSelectionError(`No se pudieron guardar las cuentas seleccionadas: ${error.message}`);
+    } finally {
+      setSavingInstagramAccounts(false);
+    }
+  };
+
+  const cancelInstagramAccountSelection = async () => {
+    if (dialog?.type !== 'instagram-account-selection' || savingInstagramAccounts) return;
+    setInstagramAccountSelectionError('');
+    setSavingInstagramAccounts(true);
+    try {
+      await apiRequest(`/connections/instagram/selections/${encodeURIComponent(dialog.selection.id)}`, { method: 'DELETE' });
+      setDialog(null);
+      setInstagramAccountAssignments({});
+      notify('Se descartó la selección temporal de Instagram; no se conectó ninguna cuenta.');
+    } catch (error) {
+      setInstagramAccountSelectionError(`No se pudo descartar la selección temporal: ${error.message}`);
+    } finally {
+      setSavingInstagramAccounts(false);
+    }
+  };
+
   const duplicatePost = async () => {
     const post = dialog?.post;
     if (!post || !copyBrandId) return;
@@ -1311,6 +1613,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       date: post.date ? new Date(post.date) : null,
       status: 'draft',
       brandId: copyBrandId,
+      accountIds: [],
     };
     try {
       const saved = await apiRequest(`/data/posts/${encodeURIComponent(copy.id)}`, {
@@ -1346,20 +1649,12 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
     return (
       <fieldset className="network-content-fields" key={networkId}>
         <legend><NetworkMark networkId={networkId} /> {network?.name} · contenido opcional personalizado</legend>
-        <label className="field-label" htmlFor={`${prefix}-${networkId}-title`}>Título para {network?.name}</label>
-        <input id={`${prefix}-${networkId}-title`} maxLength="200" onChange={(event) => setNetworkDraftContent(setter, networkId, 'title', event.target.value)} value={values.title || ''} />
-        <label className="field-label" htmlFor={`${prefix}-${networkId}-description`}>Descripción para {network?.name}</label>
-        <textarea id={`${prefix}-${networkId}-description`} maxLength="2000" onChange={(event) => setNetworkDraftContent(setter, networkId, 'description', event.target.value)} rows="2" value={values.description || ''} />
-        <label className="field-label" htmlFor={`${prefix}-${networkId}-text`}>Texto para {network?.name}</label>
-        <textarea id={`${prefix}-${networkId}-text`} maxLength="5000" onChange={(event) => setNetworkDraftContent(setter, networkId, 'text', event.target.value)} rows="3" value={values.text || ''} />
-        <label className="field-label" htmlFor={`${prefix}-${networkId}-hashtags`}>Hashtags para {network?.name}</label>
-        <input id={`${prefix}-${networkId}-hashtags`} maxLength="1000" onChange={(event) => setNetworkDraftContent(setter, networkId, 'hashtags', event.target.value)} value={values.hashtags || ''} />
-        <label className="field-label" htmlFor={`${prefix}-${networkId}-link`}>Enlace para {network?.name}</label>
-        <input id={`${prefix}-${networkId}-link`} maxLength="500" onChange={(event) => setNetworkDraftContent(setter, networkId, 'setting', { link: event.target.value })} type="url" value={values.settings?.link || ''} />
-        <label className="field-label" htmlFor={`${prefix}-${networkId}-alt`}>Texto alternativo / detalles</label>
-        <input id={`${prefix}-${networkId}-alt`} maxLength="500" onChange={(event) => setNetworkDraftContent(setter, networkId, 'setting', { altText: event.target.value })} value={values.settings?.altText || ''} />
-        <label className="field-label" htmlFor={`${prefix}-${networkId}-cta`}>Llamada a la acción</label>
-        <input id={`${prefix}-${networkId}-cta`} maxLength="500" onChange={(event) => setNetworkDraftContent(setter, networkId, 'setting', { callToAction: event.target.value })} value={values.settings?.callToAction || ''} />
+        {networkId === 'youtube' && <>
+          <label className="field-label" htmlFor={`${prefix}-${networkId}-title`}>Título de YouTube</label>
+          <input id={`${prefix}-${networkId}-title`} maxLength="100" onChange={(event) => setNetworkDraftContent(setter, networkId, 'title', event.target.value)} value={values.title || ''} />
+        </>}
+        <label className="field-label" htmlFor={`${prefix}-${networkId}-description`}>Descripción de {network?.name}</label>
+        <textarea id={`${prefix}-${networkId}-description`} maxLength={networkId === 'youtube' ? 5000 : 2000} onChange={(event) => setNetworkDraftContent(setter, networkId, 'description', event.target.value)} placeholder="Si la dejas vacía, se utiliza la descripción general." rows="3" value={values.description || ''} />
       </fieldset>
     );
   });
@@ -1486,13 +1781,27 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
           <p className="eyebrow">TU ESPACIO DE TRABAJO</p>
           <h1>¡Hola! Bienvenido a LOP</h1>
           <p className="subtitle">Organiza y prepara el contenido de tus redes desde un solo lugar.</p>
+          <div className="active-context" data-testid="active-context">
+            <div><span>Espacio</span><strong>{activeWorkspace?.name || 'Sin espacio'}</strong></div>
+            <div><span>Marca</span><strong>{activeBrand?.name || 'Sin marca seleccionada'}</strong></div>
+          </div>
         </div>
+      </section>
+
+      <section className="brand-context-selector" aria-label="Marca activa">
+        <label htmlFor="home-active-brand">Marca activa</label>
+        <select id="home-active-brand" value={activeBrandId} onChange={(event) => setActiveBrandId(event.target.value)}>
+          <option value="">Sin marca seleccionada · todo el espacio</option>
+          {activeWorkspace?.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+        </select>
+        <span role="status">{savingBrandSelection ? 'Guardando selección…' : 'Selección guardada por espacio'}</span>
+        {brandSelectionError && <p className="auth-error" role="alert">{brandSelectionError}</p>}
       </section>
 
       <section className="notice" aria-label="Estado del proyecto">
         <span className="notice-icon">i</span>
         <div>
-          <strong>Panel de revisión de la fase 1</strong>
+          <strong>Tu espacio de trabajo</strong>
           <p>Tu perfil, cuentas y borradores se guardan en SQLite local. Las conexiones oficiales solo aparecen activas tras completar OAuth real.</p>
         </div>
         <button onClick={() => goToPage('Cuentas sociales')} type="button">
@@ -1528,16 +1837,22 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
             Administrar cuentas <span aria-hidden="true">→</span>
           </button>
         </div>
-        {accounts.filter((account) => account.status === 'connected').length ? (
-          <div className="connected-accounts-list">
-            {accounts.filter((account) => account.status === 'connected').map((account) => (
-              <article className="registered-account" key={account.id}>
+        {accountOrderError && <p className="auth-error" role="alert">{accountOrderError}</p>}
+        {connectedCards.length ? (
+          <div className="connected-accounts-list" aria-label="Cuentas del espacio; arrastra para ordenar">
+            {connectedCards.map((account, index) => (
+              <article className={`social-home-card ${draggedAccountId === account.id ? 'dragging' : ''}`} key={account.id} data-account-id={account.id}
+                draggable onDragStart={(event) => { setDraggedAccountId(account.id); event.dataTransfer.setData('text/plain', account.id); event.dataTransfer.effectAllowed = 'move'; }}
+                onDragEnd={() => setDraggedAccountId(null)} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }}
+                onDrop={(event) => { event.preventDefault(); reorderAccount(event.dataTransfer.getData('text/plain'), account.id); }}>
                 <NetworkMark networkId={account.networkId} />
                 <div className="account-description">
                   <strong>{account.name}</strong>
                   <span>{getNetwork(account.networkId)?.name}</span>
                 </div>
-                <span className="connection-state"><span className="connected-dot" /> Conectada</span>
+                <span className="connection-state"><span className={account.status === 'connected' && !account.verificationError && account.verifiedAt ? 'connected-dot' : ''} />
+                  {account.verificationError === 'api-blocked' ? 'Meta: acceso bloqueado' : account.status === 'expired' ? 'Necesita reconexión' : account.verifiedAt && !account.verificationError ? 'Conectada y verificada' : 'Pendiente de verificar'}</span>
+                <div className="card-order-actions"><span aria-hidden="true">⠿</span><button type="button" disabled={index === 0} aria-label={`Mover ${account.name} antes`} onClick={() => reorderAccount(account.id, connectedCards[index - 1]?.id)}>←</button><button type="button" disabled={index === connectedCards.length - 1} aria-label={`Mover ${account.name} después`} onClick={() => reorderAccount(account.id, connectedCards[index + 1]?.id)}>→</button></div>
               </article>
             ))}
           </div>
@@ -1827,27 +2142,38 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       <div className="account-summary">
         <label htmlFor="accounts-brand-filter">Marca</label>
         <select id="accounts-brand-filter" value={activeBrandId} onChange={(event) => setActiveBrandId(event.target.value)}>
+          <option value="">Sin marca seleccionada · todo el espacio</option>
           {activeWorkspace?.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
         </select>
         <strong>{accountSummary.registeredAccounts} {accountSummary.registeredAccounts === 1 ? 'cuenta registrada' : 'cuentas registradas'}</strong>
         <strong>{accountSummary.officialConnections} {accountSummary.officialConnections === 1 ? 'conexión oficial' : 'conexiones oficiales'}</strong>
         <span>Las referencias locales no están conectadas. Las conexiones oficiales muestran sus permisos reales.</span>
       </div>
-      <div className="multi-account-note">
+      {brandSelectionError && <p className="auth-error" role="alert">{brandSelectionError}</p>}
+      {!activeBrandId && <p className="modal-notice">Ves todas las cuentas del espacio. Selecciona una marca para agregar o conectar cuentas nuevas.</p>}
+      <div className="multi-account-note connection-options">
         <span className="notice-icon">i</span>
-        <p>Conecta páginas oficiales de Facebook mediante Meta OAuth o canales oficiales de YouTube mediante Google OAuth. Elige a qué espacio y marca asignarlos; conectar no publica contenido.</p>
-        {facebookConnectionAvailable
+        <p>Conecta páginas de Facebook, cuentas profesionales de Instagram o canales de YouTube. Elige a qué espacio y marca asignarlos; conectar no publica contenido.</p>
+        {facebookConnectionAvailable && activeBrandId
           ? <a className="primary-button" href={`/api/connections/facebook/authorize?brandId=${encodeURIComponent(activeBrandId)}`}>Conectar Facebook</a>
           : <span>Facebook requiere configuración de Meta y clave de cifrado.</span>}
-        {youtubeConnectionAvailable
-          ? <a className="primary-button" href={`/api/connections/youtube/authorize?brandId=${encodeURIComponent(activeBrandId)}`}>Conectar YouTube</a>
-          : <span>YouTube requiere OAuth de Google y clave de cifrado.</span>}
+        {youtubeConnectionAvailable && activeBrandId
+          ? <a className="google-connect-button" href={`/api/connections/youtube/authorize?brandId=${encodeURIComponent(activeBrandId)}`}><GoogleMark /><span>Conectar YouTube con Google</span></a>
+          : <span>{youtubeConnectionAvailable ? 'Selecciona una marca para conectar YouTube con Google.' : 'YouTube requiere OAuth de Google y clave de cifrado.'}</span>}
+        {instagramConnectionAvailable && activeBrandId
+          ? <a className="primary-button" href={`/api/connections/instagram/authorize?brandId=${encodeURIComponent(activeBrandId)}`}>Conectar Instagram</a>
+          : <span>Instagram requiere configurar Meta y seleccionar una marca.</span>}
       </div>
+      {youtubeConnectionAvailable && <p className="modal-notice">Con Google OAuth en modo Prueba, YouTube puede pedir una nueva autorización a los siete días. Usa «Conectar YouTube» para reconectar el mismo canal; su cuenta guardada se actualizará sin duplicarse.</p>}
+      <p className="modal-notice">Instagram requiere una cuenta Business o Creator vinculada a una página de Facebook que puedas administrar. Su autorización se solicita por separado de las páginas de Facebook conectadas.</p>
       {!facebookConnectionAvailable && facebookConnectionMissing.length > 0 && (
         <p className="auth-error" role="status">Configuración local pendiente: {facebookConnectionMissing.join(', ')}. Los secretos se configuran en `.env`, no en el navegador.</p>
       )}
       {!youtubeConnectionAvailable && youtubeConnectionMissing.length > 0 && (
         <p className="auth-error" role="status">Configuración local pendiente para YouTube: {youtubeConnectionMissing.join(', ')}. Los secretos se configuran en `.env`, no en el navegador.</p>
+      )}
+      {!instagramConnectionAvailable && instagramConnectionMissing.length > 0 && (
+        <p className="auth-error" role="status">Configuración pendiente para Instagram: {instagramConnectionMissing.join(', ')}.</p>
       )}
       {brandAccounts.length ? (
         <div className="registered-accounts">
@@ -1856,16 +2182,20 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
               <NetworkMark networkId={account.networkId} />
               <div className="account-description">
                 <strong>{account.name}</strong>
-                <span>{getNetwork(account.networkId)?.name}</span>
+                <span>{getNetwork(account.networkId)?.name}{account.connectionNetwork === 'instagram' && account.username ? ` · @${account.username}` : account.connectionNetwork === 'youtube' && account.customUrl ? ` · ${account.customUrl}` : ''}</span>
+                {account.connectionNetwork === 'instagram' && account.pageName && <span>Página vinculada: {account.pageName}</span>}
+                {renderVerificationFeedback(account)}
               </div>
               <span className="connection-state">
-                <span className={account.status === 'connected' ? 'connected-dot' : ''} />
-                {account.status === 'connected'
+                <span className={account.status === 'connected' && !account.verificationError ? 'connected-dot' : ''} />
+                {account.verificationError === 'api-blocked' ? 'Meta bloqueó el acceso · revisar aplicación' : account.status === 'connected'
                   ? 'Conectada oficialmente'
-                  : account.status === 'expired' ? 'Token vencido · reconectar' : 'Sin conectar · referencia local'}
+                  : account.status === 'expired'
+                    ? verifiableConnectionNetworks.has(account.connectionNetwork) ? 'Autorización no vigente · reconectar' : 'Token vencido · reconectar'
+                    : 'Sin conectar · referencia local'}
               </span>
               {account.status === 'connected' && (
-                <span className="sample-label">Permisos: {account.grantedScopes?.join(', ') || 'verificados por el proveedor'}</span>
+                <span className="sample-label">{account.verificationError || !account.verifiedAt ? 'Permisos registrados · pendientes de verificar' : 'Permisos verificados'}: {account.grantedScopes?.join(', ') || 'consulta al proveedor necesaria'}</span>
               )}
               <div className="account-menu-wrap">
                 <button
@@ -1878,6 +2208,8 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                 {accountMenuId === account.id && (
                   <div className="action-menu" role="menu" aria-label={`Acciones para ${account.name}`}>
                     <button className="dropdown-item" onClick={() => { setDialog({ type: 'account-details', account }); setAccountMenuId(null); }} role="menuitem" type="button">Ver detalles</button>
+                    {account.connectionId && verifiableConnectionNetworks.has(account.connectionNetwork) && <button className="dropdown-item" disabled={Boolean(verifyingConnectionId)} onClick={() => verifyConnection(account)} role="menuitem" type="button">{verifyingConnectionId === account.connectionId ? 'Verificando…' : 'Verificar conexión'}</button>}
+                    {account.connectionId && verifiableConnectionNetworks.has(account.connectionNetwork) && (account.status === 'expired' || account.verificationError) && <a className="dropdown-item" href={`/api/connections/${encodeURIComponent(account.connectionNetwork)}/authorize?brandId=${encodeURIComponent(account.brandId)}`} role="menuitem">Reconectar {getNetwork(account.connectionNetwork)?.name}</a>}
                     {account.connectionId && <button className="dropdown-item" onClick={() => {
                       setConnectionWorkspaceId(account.workspaceId || initialData.workspaceId);
                       setConnectionBrandId(account.brandId || '');
@@ -1894,7 +2226,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
           ))}
         </div>
       ) : (
-        renderEmptyState('◎', 'Todavía no hay cuentas registradas', 'Conecta páginas oficiales de Facebook o canales de YouTube, o agrega una referencia local que no se presentará como conectada.', (
+        renderEmptyState('◎', 'Todavía no hay cuentas registradas', 'Conecta Facebook, Instagram profesional o YouTube, o agrega una referencia local que no se presentará como conectada.', (
           <button className="primary-button" onClick={() => setShowAccountPicker(true)} type="button">
             <span aria-hidden="true">＋</span> Agregar referencia demo
           </button>
@@ -1902,7 +2234,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       )}
       <div className="multi-account-note">
         <span className="notice-icon">i</span>
-        <p>Las conexiones oficiales de Facebook y YouTube se guardan en SQLite con tokens cifrados. «Agregar referencia demo» solo registra un elemento local y no inicia autorización en redes.</p>
+        <p>Las conexiones oficiales de Facebook, Instagram y YouTube conservan las credenciales protegidas. «Agregar referencia demo» solo registra un elemento local y no inicia autorización en redes.</p>
       </div>
     </section>
   );
@@ -2029,7 +2361,9 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       <main className="main-content">
         <header className="topbar">
           <div className="breadcrumb">
-            <button onClick={() => goToPage('Inicio')} type="button">Mi espacio</button>
+            <button onClick={() => goToPage('Inicio')} type="button">{activeWorkspace?.name || 'Sin espacio'}</button>
+            <span>/</span>
+            <span className="breadcrumb-brand">{activeBrand?.name || 'Sin marca seleccionada'}</span>
             <span>/</span>
             <strong>{activePage}</strong>
           </div>
@@ -2093,12 +2427,19 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
               <div><p className="eyebrow">BORRADOR LOCAL</p><h2>Nueva publicación</h2></div>
               <button className="close-button" onClick={() => setShowComposer(false)} type="button" aria-label="Cerrar">×</button>
             </div>
+            <fieldset className="network-selection composer-accounts">
+              <legend>Cuentas conectadas de la marca</legend>
+              <div>{draftConnectedAccounts.map((account) => <label className="network-checkbox" key={account.id}>
+                <input type="checkbox" checked={draftAccountIds.includes(account.id)} onChange={() => setDraftAccountIds((ids) => ids.includes(account.id) ? ids.filter((id) => id !== account.id) : [...ids, account.id])} />
+                <NetworkMark networkId={account.networkId} /><span><strong>{account.name}</strong><small>{getNetwork(account.networkId)?.name}</small></span>
+              </label>)}</div>
+              {!draftConnectedAccounts.length && <p>{draftBrandId ? 'Esta marca no tiene cuentas oficiales verificadas disponibles. Puedes conservar un borrador local.' : 'Selecciona una marca para ver sus cuentas conectadas.'}</p>}
+            </fieldset>
+            {composerError && <p className="auth-error" role="alert">{composerError}</p>}
             <p className="modal-notice">Guardar conserva el borrador en tu cuenta local. No se envía ni programa en redes; los archivos multimedia no se almacenan.</p>
-            <label className="field-label" htmlFor="post-title">Título (opcional)</label>
+            <label className="field-label" htmlFor="post-title">Nombre interno del borrador (opcional)</label>
             <input id="post-title" maxLength="200" onChange={(event) => setDraftTitle(event.target.value)} value={draftTitle} />
-            <label className="field-label" htmlFor="post-description">Descripción (opcional)</label>
-            <textarea id="post-description" maxLength="2000" onChange={(event) => setDraftDescription(event.target.value)} rows="2" value={draftDescription} />
-            <label className="field-label" htmlFor="post-text">Texto de la publicación</label>
+            <label className="field-label" htmlFor="post-text">Descripción general reutilizable</label>
             <textarea id="post-text" maxLength="5000" onChange={(event) => setDraftText(event.target.value)} placeholder="¿Qué quieres compartir?" rows="4" value={draftText} />
             <label className="field-label" htmlFor="post-hashtags">Hashtags (opcional)</label>
             <input id="post-hashtags" maxLength="1000" onChange={(event) => setDraftHashtags(event.target.value)} placeholder="#idea #marca" value={draftHashtags} />
@@ -2106,28 +2447,17 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
             <input id="post-media" onChange={(event) => setDraftFileName(event.target.files?.[0]?.name || '')} type="file" accept="image/*,video/*" />
             {draftFileName && <span className="file-name">{draftFileName} · archivo local</span>}
             <label className="field-label" htmlFor="draft-brand">Marca</label>
-            <select id="draft-brand" onChange={(event) => setDraftBrandId(event.target.value)} value={draftBrandId}>
+            <select id="draft-brand" onChange={(event) => { setDraftBrandId(event.target.value); setDraftAccountIds([]); setActiveBrandId(event.target.value); }} value={draftBrandId}>
+              <option value="">Selecciona una marca</option>
               {activeWorkspace?.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
             </select>
             <label className="field-label" htmlFor="draft-format">Formato</label>
             <select id="draft-format" onChange={(event) => setDraftFormat(event.target.value)} value={draftFormat}>
-              {Object.entries(formatOptionsByType).map(([format, label]) => <option key={format} value={format}>{label}</option>)}
+              {composerFormats.map((format) => <option key={format} value={format}>{formatOptionsByType[format]}</option>)}
             </select>
             <label className="calendar-undated-toggle"><input checked={draftUndated} onChange={(event) => setDraftUndated(event.target.checked)} type="checkbox" /> Guardar como borrador sin fecha</label>
             <label className="field-label" htmlFor="post-date">Fecha y hora ({getBrandTimezone(draftBrandId)})</label>
             <input disabled={draftUndated} id="post-date" onChange={(event) => setDraftDate(event.target.value)} type="datetime-local" value={draftDate} />
-            <fieldset className="network-selection">
-              <legend>Redes sociales</legend>
-              <div>
-                {networks.map((network) => (
-                  <label className="network-checkbox" key={network.id}>
-                    <input checked={draftNetworks.includes(network.id)} onChange={() => toggleDraftNetwork(network.id)} type="checkbox" />
-                    <NetworkMark networkId={network.id} />
-                    {network.name}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
             {renderNetworkContentFields(draftNetworks, draftNetworkContent, setDraftNetworkContent, 'new-network')}
             <div className="modal-actions">
               <button className="secondary-button" onClick={() => setShowComposer(false)} type="button">Cancelar</button>
@@ -2161,7 +2491,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
               </>
             ) : (
               <>
-                <div className="modal-notice"><strong>Cuenta de referencia local</strong><br />No se conectará a la red ni permitirá publicar. La vinculación oficial todavía no está habilitada.</div>
+                <div className="modal-notice"><strong>Cuenta de referencia local</strong><br />No se conectará a la red ni permitirá publicar. Para Facebook, Instagram profesional o YouTube, usa su botón «Conectar» en Cuentas sociales.</div>
                   <div className="authorization-steps">
                     <strong>Procedimiento previsto de autorización</strong>
                     <ol>
@@ -2203,7 +2533,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
 
       {dialog && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setDialog(null);
+          if (event.target === event.currentTarget && !savingInstagramAccounts) setDialog(null);
         }}>
           {dialog.type === 'profile' && (
             <form className="composer-modal settings-modal" onSubmit={saveProfile} aria-labelledby="profile-title" aria-modal="true" role="dialog">
@@ -2281,7 +2611,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
               <div className="help-content">
                 <p><strong>Navegación:</strong> Inicio resume el espacio; Calendario permite organizar fechas; Publicaciones filtra borradores por marca, red, estado, formato y fechas, y Cuentas sociales administra referencias de cuentas.</p>
                 <p><strong>Datos locales:</strong> perfil, cuentas y borradores se guardan en una base de datos SQLite de este equipo.</p>
-                <p><strong>Redes sociales:</strong> no se solicitan credenciales de redes ni se inicia OAuth social. Las conexiones y publicaciones permanecen desactivadas.</p>
+                <p><strong>Redes sociales:</strong> Facebook, Instagram profesional y YouTube se conectan mediante autorización oficial del proveedor. Agregar una referencia demo no conecta una cuenta. Las publicaciones permanecen desactivadas.</p>
                 <p>Para asistencia del proyecto, revisa los documentos de la fase 1 antes de habilitar integraciones.</p>
               </div>
               <div className="modal-actions"><button className="primary-button" onClick={() => setDialog(null)} type="button">Entendido</button></div>
@@ -2371,14 +2701,27 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
               <div className="detail-list">
                 <div><strong>Nombre visible</strong><span>{dialog.account.name}</span></div>
                 <div><strong>Red</strong><span>{getNetwork(dialog.account.networkId)?.name}</span></div>
-                <div><strong>Estado</strong><span>{dialog.account.connectionId ? dialog.account.status === 'expired' ? 'Token vencido; reconecta para actualizarlo' : `Conexión oficial verificada con ${getNetwork(dialog.account.connectionNetwork || dialog.account.networkId)?.name || 'el proveedor'}` : 'Sin conectar · referencia local de demostración'}</span></div>
+                <div><strong>Estado</strong><span>{dialog.account.connectionId ? dialog.account.status === 'expired' ? 'Autorización no vigente; vuelve a conectar la cuenta' : `Conexión oficial verificada con ${getNetwork(dialog.account.connectionNetwork || dialog.account.networkId)?.name || 'el proveedor'}` : 'Sin conectar · referencia local de demostración'}</span></div>
                 {dialog.account.connectionId && <div><strong>Permisos concedidos</strong><span>{dialog.account.grantedScopes?.join(', ') || 'No se recibieron permisos'}</span></div>}
+                {dialog.account.connectionNetwork === 'instagram' && (
+                  <>
+                    <div><strong>Cuenta de Instagram</strong><span>{dialog.account.username ? `@${dialog.account.username} · ` : ''}{dialog.account.providerAccountId}</span></div>
+                    <div><strong>Página de Facebook vinculada</strong><span>{dialog.account.pageName || dialog.account.pageId || 'No disponible'}</span></div>
+                    {dialog.account.expiresAt && <div><strong>Vigencia de la autorización</strong><span>{formatInZone(new Date(dialog.account.expiresAt), brandTimezoneValue, { dateStyle: 'medium', timeStyle: 'short' })}</span></div>}
+                  </>
+                )}
+                {dialog.account.connectionNetwork === 'youtube' && <div><strong>Canal de YouTube</strong><span>{dialog.account.customUrl ? `${dialog.account.customUrl} · ` : ''}{dialog.account.providerAccountId}</span></div>}
+                {verifiableConnectionNetworks.has(dialog.account.connectionNetwork) && dialog.account.verifiedAt && <div><strong>Última verificación</strong><span>{formatInZone(new Date(dialog.account.verifiedAt), brandTimezoneValue, { dateStyle: 'medium', timeStyle: 'short' })}</span></div>}
                 <div><strong>Identificador local</strong><span>{dialog.account.id}</span></div>
               </div>
               <p className="modal-notice">{dialog.account.connectionId
                 ? 'LOP cifra las credenciales de OAuth en SQLite y no las devuelve al navegador. La conexión no publica contenido.'
                 : 'Esta referencia es local; no se ha autorizado ni conectado ninguna cuenta social.'}</p>
-              <div className="modal-actions"><button className="primary-button" onClick={() => setDialog(null)} type="button">Cerrar</button></div>
+              {renderVerificationFeedback(dialog.account)}
+              <div className="modal-actions">
+                {dialog.account.connectionId && verifiableConnectionNetworks.has(dialog.account.connectionNetwork) && <button className="secondary-button" disabled={Boolean(verifyingConnectionId)} onClick={() => verifyConnection(dialog.account)} type="button">{verifyingConnectionId === dialog.account.connectionId ? 'Verificando…' : 'Verificar conexión'}</button>}
+                <button className="primary-button" onClick={() => setDialog(null)} type="button">Cerrar</button>
+              </div>
             </section>
           )}
 
@@ -2498,6 +2841,72 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                   onClick={confirmYouTubeChannelSelection}
                   type="button"
                 >{savingYoutubeChannels ? 'Guardando…' : 'Conectar canales seleccionados'}</button>
+              </div>
+            </section>
+          )}
+
+          {dialog.type === 'instagram-account-selection' && (
+            <section className="composer-modal settings-modal" aria-labelledby="instagram-account-selection-title" aria-modal="true" aria-busy={savingInstagramAccounts} role="dialog">
+              <div className="modal-heading">
+                <div><p className="eyebrow">AUTORIZACIÓN DE INSTAGRAM</p><h2 id="instagram-account-selection-title">Elige las cuentas de Instagram</h2></div>
+                <button className="close-button" disabled={savingInstagramAccounts} onClick={cancelInstagramAccountSelection} type="button" aria-label="Cerrar">×</button>
+              </div>
+              <p className="modal-description">Meta encontró {dialog.selection.accounts.length} cuenta(s) profesionales vinculadas a páginas de Facebook. Selecciona las que quieras conectar y asigna cada una a un espacio y una marca.</p>
+              <p className="modal-notice">Permisos autorizados: {dialog.selection.grantedScopes.join(', ')}. Esta selección vence en 30 minutos. No se publicará contenido ni se cambiará la asignación de tus páginas de Facebook.</p>
+              <div className="facebook-page-selection-list">
+                {dialog.selection.accounts.map((account, index) => {
+                  const assignment = instagramAccountAssignments[account.id];
+                  const accountBrands = workspaces.find((item) => item.id === assignment?.workspaceId)?.brands || [];
+                  return (
+                    <fieldset className="facebook-page-option" key={account.id}>
+                      <legend>
+                        <input
+                          aria-label={`Conectar ${account.username ? `@${account.username}` : account.name}`}
+                          checked={Boolean(assignment?.selected)}
+                          disabled={savingInstagramAccounts}
+                          id={`instagram-account-${index}`}
+                          onChange={(event) => updateInstagramAccountAssignment(account.id, { selected: event.target.checked })}
+                          type="checkbox"
+                        />
+                        <span>{account.name || account.username}</span>
+                      </legend>
+                      {account.username && <small>@{account.username}</small>}
+                      <small>Página vinculada: {account.pageName || account.pageId}</small>
+                      <label className="field-label" htmlFor={`instagram-workspace-${index}`}>Espacio</label>
+                      <select
+                        disabled={!assignment?.selected || savingInstagramAccounts}
+                        id={`instagram-workspace-${index}`}
+                        onChange={(event) => {
+                          const workspaceId = event.target.value;
+                          const brandId = workspaces.find((item) => item.id === workspaceId)?.brands[0]?.id || '';
+                          updateInstagramAccountAssignment(account.id, { workspaceId, brandId });
+                        }}
+                        value={assignment?.workspaceId || ''}
+                      >
+                        {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+                      </select>
+                      <label className="field-label" htmlFor={`instagram-brand-${index}`}>Marca</label>
+                      <select
+                        disabled={!assignment?.selected || accountBrands.length === 0 || savingInstagramAccounts}
+                        id={`instagram-brand-${index}`}
+                        onChange={(event) => updateInstagramAccountAssignment(account.id, { brandId: event.target.value })}
+                        value={assignment?.brandId || ''}
+                      >
+                        {accountBrands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+                      </select>
+                    </fieldset>
+                  );
+                })}
+              </div>
+              {instagramAccountSelectionError && <p className="auth-error" role="alert">{instagramAccountSelectionError}</p>}
+              <div className="modal-actions">
+                <button className="secondary-button" disabled={savingInstagramAccounts} onClick={cancelInstagramAccountSelection} type="button">Cancelar</button>
+                <button
+                  className="primary-button"
+                  disabled={savingInstagramAccounts || !Object.values(instagramAccountAssignments).some((assignment) => assignment.selected)}
+                  onClick={confirmInstagramAccountSelection}
+                  type="button"
+                >{savingInstagramAccounts ? 'Guardando…' : 'Conectar cuentas seleccionadas'}</button>
               </div>
             </section>
           )}
