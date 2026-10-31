@@ -1,6 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
-const readScope = 'https://www.googleapis.com/auth/youtube.readonly';
+export const youtubeRequiredScopes = Object.freeze([
+  'https://www.googleapis.com/auth/youtube.readonly',
+  'https://www.googleapis.com/auth/youtube.upload',
+]);
 const lifetime = 30 * 60 * 1000;
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -48,7 +51,7 @@ export function registerYouTubeRoutes({
     if (typeof accessToken !== 'string' || !accessToken) throw failure('token-invalid');
     const info = await oauthClient.getTokenInfo(accessToken);
     if (info.aud !== config.clientId) throw failure('token-invalid');
-    if (!Array.isArray(info.scopes) || !info.scopes.includes(readScope)) throw failure('permissions-missing');
+    if (!Array.isArray(info.scopes) || !youtubeRequiredScopes.every((scope) => info.scopes.includes(scope))) throw failure('permissions-missing');
     if (!Number.isFinite(info.expiry_date) || info.expiry_date <= Date.now()) throw failure('token-invalid');
     return info;
   };
@@ -150,7 +153,7 @@ export function registerYouTubeRoutes({
       (state_hash, user_id, session_token_hash, workspace_id, brand_id, expires_at) VALUES (?, ?, ?, ?, ?, ?)`)
       .run(hash(state), request.user.id, request.sessionTokenHash, workspaceId, request.query.brandId, Date.now() + lifetime);
     response.redirect(oauthClient.generateAuthUrl({
-      access_type: 'offline', include_granted_scopes: true, prompt: 'consent', scope: [readScope], state,
+      access_type: 'offline', include_granted_scopes: true, prompt: 'consent', scope: [...youtubeRequiredScopes], state,
     }));
   });
   app.get('/api/connections/youtube/callback', async (request, response) => {
@@ -295,6 +298,9 @@ export function registerYouTubeRoutes({
     } catch (error) {
       if (!sessionValid(request.user.id, request.sessionTokenHash)) return jsonError(response, 401, 'La sesión venció durante la verificación.');
       if (error.localStatus) return jsonError(response, error.localStatus, 'La conexión cambió durante la verificación. Actualiza las cuentas.');
+      if (reasonFor(error) === 'permissions-missing') {
+        return jsonError(response, 403, 'YouTube requiere youtube.readonly y youtube.upload. Se conservaron la conexión y sus credenciales; falta autorizar ambos permisos.');
+      }
       if (!invalidAuthorization(error) && reasonFor(error) !== 'refresh-token-required') {
         return jsonError(response, 502, reasonFor(error) === 'api-disabled'
           ? 'Habilita YouTube Data API v3 en el proyecto Google Cloud del cliente existente. Se conservó el estado anterior.'

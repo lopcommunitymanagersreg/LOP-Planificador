@@ -277,6 +277,14 @@ h2 { color: #203f51; font-size: 16px; letter-spacing: -.02em; }
 .connection-options { flex-wrap: wrap; }
 .connection-options p { flex: 1 1 calc(100% - 40px); }
 .connection-options > a { white-space: nowrap; }
+.connection-buttons-row { display: flex; flex: 0 0 100%; flex-wrap: nowrap; align-items: center; gap: 10px; min-width: 0; }
+.connection-buttons-row > a, .connection-buttons-row > button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 10px; height: 44px; white-space: nowrap; }
+.connection-logo { width: 24px; height: 24px; flex: 0 0 24px; object-fit: contain; }
+.connection-buttons-row > button:disabled { cursor: not-allowed; }
+@media (max-width: 1280px) {
+  .connection-buttons-row .connection-button-text { display: none; }
+  .connection-buttons-row > a, .connection-buttons-row > button { width: 44px; min-width: 44px; padding: 9px; }
+}
 .action-menu a.dropdown-item { text-decoration: none; }
 .account-summary { display: flex; align-items: center; gap: 12px; margin: 24px 0 14px; padding: 12px 15px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .account-summary strong { font-size: 12px; }
@@ -686,6 +694,58 @@ h2 { color: #203f51; font-size: 16px; letter-spacing: -.02em; }
 .auth-text-button { width: fit-content; justify-self: center; padding: 5px; border: 0; background: transparent; color: var(--blue); font-size: 12px; font-weight: 700; }
 .auth-text-button:disabled { color: var(--subtle); }
 .auth-recovery-link { margin: 12px auto 0; }
+.home-context-heading > div { width: 100%; min-width: 0; }
+.home-context-selectors { align-items: start; }
+.home-context-heading .active-context, .home-context-selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 320px)); column-gap: 24px; row-gap: 14px; }
+.home-context-heading .active-context > div { min-width: 0; }
+.home-context-heading .active-context strong { overflow-wrap: anywhere; }
+.home-context-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto 34px; align-items: center; align-content: start; gap: 8px; min-width: 0; }
+.home-context-control label { grid-column: 1 / -1; white-space: nowrap; }
+.home-context-selectors .home-context-control select { grid-column: 1; grid-row: 2; min-width: 0; width: 100%; max-width: 100%; height: 34px; }
+.home-context-selectors .home-context-control:first-child select { grid-column: 1 / -1; }
+.home-context-control .context-action { grid-column: 2; grid-row: 2; height: 34px; margin-left: 0; white-space: nowrap; }
+.home-context-selectors > [role="status"], .home-context-selectors > .auth-error { grid-column: 1 / -1; }
+.tiktok-connect-button { display: inline-flex; align-items: center; justify-content: center; gap: 12px; min-height: 40px; padding: 9px 14px; border: 1px solid #161823; border-radius: 4px; background: #000; color: #fff; font-size: 14px; font-weight: 500; text-decoration: none; }
+.tiktok-connect-button:hover:not(:disabled) { box-shadow: -2px 2px 0 #25f4ee, 2px -2px 0 #fe2c55; }
+.tiktok-connect-button:focus-visible { outline: 2px solid #25f4ee; outline-offset: 3px; }
+.tiktok-connect-button:disabled { cursor: not-allowed; border-color: #555; }
+.tiktok-mark { flex: 0 0 24px; object-fit: contain; }
+.tiktok-connect-pending { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+@media (max-width: 640px) {
+  .home-context-heading .active-context, .home-context-selectors { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; max-width: calc(100vw - 28px); }
+  .home-context-control { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 34px auto; }
+  .home-context-control .context-action { grid-column: 1; grid-row: 3; justify-self: start; max-width: 100%; }
+  .home-context-control label { font-size: 12px; }
+}
+.accounts-view .registered-accounts { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; align-items: start; }
+.accounts-view .registered-account { position: relative; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; aspect-ratio: 1; min-width: 0; min-height: 220px; padding: 24px; border: 1px solid #82b4e0; border-radius: 18px; background: linear-gradient(145deg, var(--surface), var(--panel)); box-shadow: 0 7px 0 #2269aa1a, 0 14px 28px #1865b324, inset 0 1px 0 #ffffff88; }
+.accounts-view .registered-account > .network-mark { width: 42px; height: 42px; font-size: 22px; }
+.accounts-view .registered-account .account-description { flex: 0; width: 100%; min-width: 0; }
+.accounts-view .registered-account .account-description strong { font-size: 16px; overflow-wrap: anywhere; }
+.accounts-view .registered-account .account-description > span { overflow-wrap: anywhere; }
+.accounts-view .registered-account .account-description { display: contents; }
+.accounts-view .registered-account .account-description strong { order: 1; }
+.accounts-view .registered-account > .connection-state { order: 2; }
+.accounts-view .registered-account .account-description > span { order: 3; }
+.accounts-view .registered-account .connection-feedback { order: 4; }
+.accounts-view .registered-account > .connection-state { flex: 0; align-items: flex-start; font-size: 12px; white-space: normal; }
+.accounts-view .registered-account .account-menu-wrap { position: absolute; top: 12px; right: 12px; }
+.accounts-view .registered-account:focus-within { z-index: 3; }
+.accounts-view .registered-account .connection-feedback { font-size: 11px; padding: 8px; }
+.permissions-modal { width: min(880px, calc(100vw - 32px)); }
+.permissions-table-wrap { overflow-x: auto; }
+.permissions-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+.permissions-table th, .permissions-table td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.permissions-table th { color: var(--blue); }
+.permissions-table code { overflow-wrap: anywhere; font-size: 11px; }
+.connection-help { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.brand-context-selector select, .account-summary select { max-width: 230px; font-weight: 700; background: var(--surface); color: var(--ink); }
+.context-action { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--blue); font-size: 12px; cursor: pointer; }
+.context-action[aria-pressed="true"] { background: #e6f1ff; font-weight: 700; }
+.managed-brand.selected { border-color: #84b5e0; background: #f2f8ff; }
+.managed-workspace-copy strong, .managed-brand-copy strong { font-weight: 500; }
+.managed-workspace.selected .managed-workspace-copy strong, .managed-brand.selected .managed-brand-copy strong, .breadcrumb .active-context-name, .breadcrumb-brand { font-weight: 800; }
+@media (max-width: 480px) { .accounts-view .registered-accounts { grid-template-columns: minmax(0, 1fr); } .managed-brand { flex-wrap: wrap; } .brand-context-selector select { max-width: 100%; } }
 .auth-provider-note { margin-top: 13px; text-align: center; }
 .profile-email-value { margin: 0 0 13px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .auth-switch { margin: 20px 0 0; color: var(--muted); font-size: 13px; text-align: center; }

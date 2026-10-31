@@ -9,6 +9,8 @@ import { createApp, createYouTubeOAuthConfig } from '../server/index.js';
 
 const origin = 'http://localhost:5173';
 const readOnlyScope = 'https://www.googleapis.com/auth/youtube.readonly';
+const uploadScope = 'https://www.googleapis.com/auth/youtube.upload';
+const requiredScopes = [readOnlyScope, uploadScope];
 const encryptionKey = Buffer.alloc(32, 11);
 const clientId = 'test-youtube-client.apps.googleusercontent.com';
 const channelOne = 'UC1111111111111111111111';
@@ -125,7 +127,7 @@ function createYouTubeProvider() {
       return { tokens: {
         access_token: 'test-youtube-access-initial',
         ...(provider.missingRefreshToken ? {} : { refresh_token: 'test-youtube-refresh-initial' }),
-        scope: readOnlyScope,
+        scope: requiredScopes.join(' '),
         expiry_date: provider.initialExpiry,
       } };
     },
@@ -137,7 +139,10 @@ function createYouTubeProvider() {
       });
       return {
         aud: provider.infoMode === 'wrong-audience' ? 'another-client.apps.googleusercontent.com' : clientId,
-        scopes: provider.infoMode === 'missing-scope' ? ['openid', 'email'] : [readOnlyScope],
+        scopes: provider.infoMode === 'missing-scope' ? ['openid', 'email']
+          : provider.infoMode === 'missing-upload' ? [readOnlyScope]
+          : provider.infoMode === 'missing-readonly' ? [uploadScope]
+          : requiredScopes,
         expiry_date: accessToken === 'test-youtube-access-initial' ? provider.initialExpiry : Date.now() + 60 * 60 * 1000,
       };
     },
@@ -154,7 +159,7 @@ function createYouTubeProvider() {
         access_token: `test-youtube-access-refreshed-${provider.refreshCalls.length}`,
         ...(provider.rotateRefreshToken ? { refresh_token: `test-youtube-refresh-rotated-${provider.refreshCalls.length}` } : {}),
         expiry_date: Date.now() + 60 * 60 * 1000,
-        scope: readOnlyScope,
+        scope: requiredScopes.join(' '),
       } };
     },
   };
@@ -315,7 +320,7 @@ async function connectOne(fixture, owner) {
   return result.payload.connections.find(({ networkId, providerAccountId }) => networkId === 'youtube' && providerAccountId === channelOne);
 }
 
-test('YouTube requests read-only offline access and binds one-time OAuth state to its live session', async () => {
+test('YouTube requests read and upload offline access and binds one-time OAuth state to its live session', async () => {
   await withYouTube(async (fixture) => {
     const owner = fixture.seedOwner('youtube-owner');
     const other = fixture.seedOwner('youtube-other');
@@ -324,7 +329,9 @@ test('YouTube requests read-only offline access and binds one-time OAuth state t
     assert.equal(methods.payload.youtube.available, true);
     const authorization = await authorize(fixture, owner);
     assert.equal(authorization.hostname, 'accounts.google.com');
-    assert.deepEqual(fixture.provider.authorizationOptions.scope, [readOnlyScope]);
+    assert.deepEqual(fixture.provider.authorizationOptions.scope, requiredScopes);
+    assert.deepEqual(methods.payload.youtube.requiredScopes, requiredScopes);
+    assert.equal(fixture.provider.authorizationOptions.include_granted_scopes, true);
     assert.equal(fixture.provider.authorizationOptions.access_type, 'offline');
     assert.equal(fixture.provider.authorizationOptions.prompt, 'consent');
     const state = authorization.searchParams.get('state');
@@ -344,7 +351,7 @@ test('YouTube requests read-only offline access and binds one-time OAuth state t
 test('YouTube validates token audience, actual granted scope and refresh grant before offering a channel', async () => {
   await withYouTube(async (fixture) => {
     const owner = fixture.seedOwner('youtube-owner');
-    for (const mode of ['wrong-audience', 'missing-scope', 'revoked']) {
+    for (const mode of ['wrong-audience', 'missing-scope', 'missing-upload', 'missing-readonly', 'revoked']) {
       fixture.provider.infoMode = mode;
       const authorization = await authorize(fixture, owner);
       const redirect = await completeCallback(fixture, owner, authorization.searchParams.get('state'));
@@ -594,5 +601,47 @@ test('YouTube delayed verification success or revocation cannot overwrite a newl
       assert.equal(record.status, 'connected');
       assert.equal(record.token, replacement);
     }
+  });
+});
+
+
+test('YouTube missing permissions preserve existing connection and credentials during verification', async () => {
+  await withYouTube(async (fixture) => {
+    const owner = fixture.seedOwner('youtube-owner');
+    const connection = await connectOne(fixture, owner);
+    fixture.database.prepare('UPDATE youtube_connections SET granted_scopes_json = ? WHERE id = ?')
+      .run(JSON.stringify([readOnlyScope]), connection.id);
+    const before = fixture.database.prepare('SELECT * FROM youtube_connections WHERE id = ?').get(connection.id);
+    await fixture.restart();
+    assert.deepEqual(fixture.database.prepare('SELECT * FROM youtube_connections WHERE id = ?').get(connection.id), before);
+    for (const mode of ['missing-upload', 'missing-readonly']) {
+      fixture.provider.infoMode = mode;
+      const result = await fixture.request('/connections/' + connection.id + '/verify', { cookie: owner.cookie, method: 'POST' });
+      assert.equal(result.response.status, 403, mode);
+      assert.match(result.payload.error, /youtube.readonly.*youtube.upload/);
+      assert.deepEqual(fixture.database.prepare('SELECT * FROM youtube_connections WHERE id = ?').get(connection.id), before);
+      const authorization = await authorize(fixture, owner);
+      const redirect = await completeCallback(fixture, owner, authorization.searchParams.get('state'));
+      assert.equal(redirect.searchParams.get('reason'), 'permissions-missing');
+      assert.deepEqual(fixture.database.prepare('SELECT * FROM youtube_connections WHERE id = ?').get(connection.id), before);
+    }
+  });
+});
+
+test('YouTube rejects a refreshed token missing upload permission before saving a selection', async () => {
+  await withYouTube(async (fixture) => {
+    const owner = fixture.seedOwner('youtube-owner');
+    const inspect = fixture.provider.oauthClient.getTokenInfo;
+    fixture.provider.oauthClient.getTokenInfo = async (token) => {
+      const info = await inspect(token);
+      return token.includes('refreshed') ? { ...info, scopes: [readOnlyScope] } : info;
+    };
+    const authorization = await authorize(fixture, owner);
+    const redirect = await completeCallback(fixture, owner, authorization.searchParams.get('state'));
+    assert.equal(redirect.searchParams.get('reason'), 'permissions-missing');
+    assert.equal(fixture.provider.refreshCalls.length, 1);
+    assert.equal(fixture.provider.apiCalls.length, 0);
+    assert.equal(fixture.database.prepare('SELECT COUNT(*) AS n FROM youtube_channel_selections').get().n, 0);
+    assert.equal(fixture.database.prepare('SELECT COUNT(*) AS n FROM youtube_connections').get().n, 0);
   });
 });

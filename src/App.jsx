@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import AuthScreen from './AuthScreen.jsx';
-import GoogleMark from './GoogleMark.jsx';
+import facebookConnectionLogo from './assets/facebook-connection.svg';
+import instagramConnectionLogo from './assets/instagram-connection.svg';
+import youtubeConnectionLogo from './assets/youtube-connection.svg';
+import TikTokMark from './TikTokMark.jsx';
 import { apiRequest } from './api.js';
+import { getAccountPermissions } from './permissions.js';
 
 const networks = [
   { id: 'facebook', name: 'Facebook', mark: 'f', className: 'facebook' },
@@ -12,7 +16,7 @@ const networks = [
   { id: 'linkedin', name: 'LinkedIn', mark: 'in', className: 'linkedin' },
   { id: 'x', name: 'X', mark: 'X', className: 'x' },
 ];
-const verifiableConnectionNetworks = new Set(['facebook', 'instagram', 'youtube']);
+const verifiableConnectionNetworks = new Set(['facebook', 'instagram', 'youtube', 'tiktok']);
 
 const navigation = [
   { id: 'Inicio', icon: '⌂' },
@@ -145,6 +149,8 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
   const [youtubeConnectionMissing, setYoutubeConnectionMissing] = useState([]);
   const [instagramConnectionAvailable, setInstagramConnectionAvailable] = useState(false);
   const [instagramConnectionMissing, setInstagramConnectionMissing] = useState([]);
+  const [tiktokConnectionAvailable, setTiktokConnectionAvailable] = useState(false);
+  const [connectionMethods, setConnectionMethods] = useState({});
   const [facebookPageAssignments, setFacebookPageAssignments] = useState({});
   const [facebookPageSelectionError, setFacebookPageSelectionError] = useState('');
   const [savingFacebookPages, setSavingFacebookPages] = useState(false);
@@ -382,7 +388,10 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       .then(({ google }) => setGoogleEnabled(Boolean(google)))
       .catch((error) => notify(`No se pudo comprobar la configuración de Google: ${error.message}`));
     apiRequest('/connections/methods')
-      .then(({ facebook, youtube, instagram }) => {
+      .then((methods) => {
+        const { facebook, youtube, instagram, tiktok } = methods;
+        setConnectionMethods(methods);
+        setTiktokConnectionAvailable(Boolean(tiktok?.available));
         setFacebookConnectionAvailable(Boolean(facebook?.available));
         setFacebookConnectionMissing(facebook?.missing || []);
         setYoutubeConnectionAvailable(Boolean(youtube?.available));
@@ -542,6 +551,13 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
     };
     const handleFacebookReturn = async () => {
       try {
+        if (connectionResult === 'tiktok-connected' || connectionResult === 'tiktok-error') {
+          setNotification(connectionResult === 'tiktok-connected'
+            ? 'Tu cuenta de TikTok quedó conectada. Selecciona su espacio y marca para verla.'
+            : 'No se pudo completar la conexión con TikTok. Revisa la autorización y la configuración de la aplicación. Tus conexiones anteriores se conservaron.');
+          window.history.replaceState({}, '', window.location.pathname);
+          return;
+        }
         if (connectionResult === 'instagram-select') {
           const selectionId = connectionQuery.get('selection');
           if (selectionId) {
@@ -1776,7 +1792,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
 
   const renderHome = () => (
     <>
-      <section className="welcome-row">
+      <section className="welcome-row home-context-heading">
         <div>
           <p className="eyebrow">TU ESPACIO DE TRABAJO</p>
           <h1>¡Hola! Bienvenido a LOP</h1>
@@ -1788,12 +1804,23 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
         </div>
       </section>
 
-      <section className="brand-context-selector" aria-label="Marca activa">
+      <section className="brand-context-selector home-context-selectors" aria-label="Marca activa">
+        <div className="home-context-control">
+        <label htmlFor="home-active-workspace">Espacio activo</label>
+        <select id="home-active-workspace" value={initialData.workspaceId} onChange={(event) => event.target.value === '__create__' ? openWorkspaceForm('workspace-create') : selectWorkspace(event.target.value)}>
+          {workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          <option value="__create__">＋ Crear espacio…</option>
+        </select>
+        </div>
+        <div className="home-context-control">
         <label htmlFor="home-active-brand">Marca activa</label>
-        <select id="home-active-brand" value={activeBrandId} onChange={(event) => setActiveBrandId(event.target.value)}>
+        <select id="home-active-brand" value={activeBrandId} onChange={(event) => event.target.value === '__create__' ? openBrandForm('brand-create') : setActiveBrandId(event.target.value)}>
           <option value="">Sin marca seleccionada · todo el espacio</option>
           {activeWorkspace?.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+          <option value="__create__">＋ Crear marca…</option>
         </select>
+        {activeBrandId && <button className="context-action" onClick={() => setActiveBrandId('')} type="button">Desactivar marca</button>}
+        </div>
         <span role="status">{savingBrandSelection ? 'Guardando selección…' : 'Selección guardada por espacio'}</span>
         {brandSelectionError && <p className="auth-error" role="alert">{brandSelectionError}</p>}
       </section>
@@ -1802,7 +1829,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
         <span className="notice-icon">i</span>
         <div>
           <strong>Tu espacio de trabajo</strong>
-          <p>Tu perfil, cuentas y borradores se guardan en SQLite local. Las conexiones oficiales solo aparecen activas tras completar OAuth real.</p>
+          <p>Tus cuentas y borradores se guardan en tu espacio. Puedes consultar y administrar las cuentas autorizadas en Cuentas sociales.</p>
         </div>
         <button onClick={() => goToPage('Cuentas sociales')} type="button">
           Ver cuentas <span aria-hidden="true">→</span>
@@ -2141,9 +2168,10 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       </div>
       <div className="account-summary">
         <label htmlFor="accounts-brand-filter">Marca</label>
-        <select id="accounts-brand-filter" value={activeBrandId} onChange={(event) => setActiveBrandId(event.target.value)}>
+        <select id="accounts-brand-filter" value={activeBrandId} onChange={(event) => event.target.value === '__create__' ? openBrandForm('brand-create') : setActiveBrandId(event.target.value)}>
           <option value="">Sin marca seleccionada · todo el espacio</option>
           {activeWorkspace?.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+          <option value="__create__">＋ Crear marca…</option>
         </select>
         <strong>{accountSummary.registeredAccounts} {accountSummary.registeredAccounts === 1 ? 'cuenta registrada' : 'cuentas registradas'}</strong>
         <strong>{accountSummary.officialConnections} {accountSummary.officialConnections === 1 ? 'conexión oficial' : 'conexiones oficiales'}</strong>
@@ -2154,26 +2182,32 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       <div className="multi-account-note connection-options">
         <span className="notice-icon">i</span>
         <p>Conecta páginas de Facebook, cuentas profesionales de Instagram o canales de YouTube. Elige a qué espacio y marca asignarlos; conectar no publica contenido.</p>
+        <div className="connection-buttons-row" aria-label="Conectar cuentas sociales">
         {facebookConnectionAvailable && activeBrandId
-          ? <a className="primary-button" href={`/api/connections/facebook/authorize?brandId=${encodeURIComponent(activeBrandId)}`}>Conectar Facebook</a>
-          : <span>Facebook requiere configuración de Meta y clave de cifrado.</span>}
+          ? <a className="primary-button" aria-label="Conectar Facebook" href={`/api/connections/facebook/authorize?brandId=${encodeURIComponent(activeBrandId)}`}><img className="connection-logo" src={facebookConnectionLogo} alt="" aria-hidden="true" /><span className="connection-button-text">Conectar Facebook</span></a>
+          : <button className="primary-button" aria-label="Conectar Facebook" title="Selecciona una marca y comprueba la configuración de Facebook" disabled type="button"><img className="connection-logo" src={facebookConnectionLogo} alt="" aria-hidden="true" /><span className="connection-button-text">Conectar Facebook</span></button>}
         {youtubeConnectionAvailable && activeBrandId
-          ? <a className="google-connect-button" href={`/api/connections/youtube/authorize?brandId=${encodeURIComponent(activeBrandId)}`}><GoogleMark /><span>Conectar YouTube con Google</span></a>
-          : <span>{youtubeConnectionAvailable ? 'Selecciona una marca para conectar YouTube con Google.' : 'YouTube requiere OAuth de Google y clave de cifrado.'}</span>}
+          ? <a className="google-connect-button" aria-label="Conectar YouTube con Google" href={`/api/connections/youtube/authorize?brandId=${encodeURIComponent(activeBrandId)}`}><img className="connection-logo" src={youtubeConnectionLogo} alt="" aria-hidden="true" /><span className="connection-button-text">Conectar YouTube con Google</span></a>
+          : <button className="google-connect-button" aria-label="Conectar YouTube con Google" title="Selecciona una marca y comprueba la configuración de YouTube" disabled type="button"><img className="connection-logo" src={youtubeConnectionLogo} alt="" aria-hidden="true" /><span className="connection-button-text">Conectar YouTube con Google</span></button>}
         {instagramConnectionAvailable && activeBrandId
-          ? <a className="primary-button" href={`/api/connections/instagram/authorize?brandId=${encodeURIComponent(activeBrandId)}`}>Conectar Instagram</a>
-          : <span>Instagram requiere configurar Meta y seleccionar una marca.</span>}
+          ? <a className="primary-button" aria-label="Conectar Instagram" href={`/api/connections/instagram/authorize?brandId=${encodeURIComponent(activeBrandId)}`}><img className="connection-logo" src={instagramConnectionLogo} alt="" aria-hidden="true" /><span className="connection-button-text">Conectar Instagram</span></a>
+          : <button className="primary-button" aria-label="Conectar Instagram" title="Selecciona una marca y comprueba la configuración de Instagram" disabled type="button"><img className="connection-logo" src={instagramConnectionLogo} alt="" aria-hidden="true" /><span className="connection-button-text">Conectar Instagram</span></button>}
+        {tiktokConnectionAvailable && activeBrandId
+          ? <a className="tiktok-connect-button" aria-label="Conectar TikTok" href={`/api/connections/tiktok/authorize?brandId=${encodeURIComponent(activeBrandId)}`}><TikTokMark /><span className="connection-button-text">Conectar TikTok</span></a>
+          : <button className="tiktok-connect-button" aria-label="Conectar TikTok" disabled aria-describedby="tiktok-connect-reason" type="button"><TikTokMark /><span className="connection-button-text">Conectar TikTok</span></button>}
+        </div>
+        {(!tiktokConnectionAvailable || !activeBrandId) && <span className="connection-help" id="tiktok-connect-reason">{tiktokConnectionAvailable ? 'Selecciona una marca para conectar tu cuenta.' : 'La conexión está pendiente de habilitación por el administrador.'}</span>}
       </div>
-      {youtubeConnectionAvailable && <p className="modal-notice">Con Google OAuth en modo Prueba, YouTube puede pedir una nueva autorización a los siete días. Usa «Conectar YouTube» para reconectar el mismo canal; su cuenta guardada se actualizará sin duplicarse.</p>}
-      <p className="modal-notice">Instagram requiere una cuenta Business o Creator vinculada a una página de Facebook que puedas administrar. Su autorización se solicita por separado de las páginas de Facebook conectadas.</p>
+      {youtubeConnectionAvailable && <p className="connection-help">Durante las pruebas, Google puede pedir renovar la autorización a los siete días. Al conectar de nuevo el mismo canal, se actualiza su acceso sin duplicarlo.</p>}
+      <p className="connection-help">Para Instagram necesitas una cuenta profesional vinculada a una página de Facebook que administres. Podrás revisar el acceso de cada cuenta en «Ver permisos».</p>
       {!facebookConnectionAvailable && facebookConnectionMissing.length > 0 && (
-        <p className="auth-error" role="status">Configuración local pendiente: {facebookConnectionMissing.join(', ')}. Los secretos se configuran en `.env`, no en el navegador.</p>
+        <p className="connection-help" role="status">La conexión de Facebook está pendiente de habilitación por el administrador.</p>
       )}
       {!youtubeConnectionAvailable && youtubeConnectionMissing.length > 0 && (
-        <p className="auth-error" role="status">Configuración local pendiente para YouTube: {youtubeConnectionMissing.join(', ')}. Los secretos se configuran en `.env`, no en el navegador.</p>
+        <p className="connection-help" role="status">La conexión de YouTube está pendiente de habilitación por el administrador.</p>
       )}
       {!instagramConnectionAvailable && instagramConnectionMissing.length > 0 && (
-        <p className="auth-error" role="status">Configuración pendiente para Instagram: {instagramConnectionMissing.join(', ')}.</p>
+        <p className="connection-help" role="status">La conexión de Instagram está pendiente de habilitación por el administrador.</p>
       )}
       {brandAccounts.length ? (
         <div className="registered-accounts">
@@ -2194,9 +2228,6 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                     ? verifiableConnectionNetworks.has(account.connectionNetwork) ? 'Autorización no vigente · reconectar' : 'Token vencido · reconectar'
                     : 'Sin conectar · referencia local'}
               </span>
-              {account.status === 'connected' && (
-                <span className="sample-label">{account.verificationError || !account.verifiedAt ? 'Permisos registrados · pendientes de verificar' : 'Permisos verificados'}: {account.grantedScopes?.join(', ') || 'consulta al proveedor necesaria'}</span>
-              )}
               <div className="account-menu-wrap">
                 <button
                   className="icon-button"
@@ -2208,6 +2239,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                 {accountMenuId === account.id && (
                   <div className="action-menu" role="menu" aria-label={`Acciones para ${account.name}`}>
                     <button className="dropdown-item" onClick={() => { setDialog({ type: 'account-details', account }); setAccountMenuId(null); }} role="menuitem" type="button">Ver detalles</button>
+                    <button className="dropdown-item" onClick={() => { setDialog({ type: 'account-permissions', account }); setAccountMenuId(null); }} role="menuitem" type="button">Ver permisos</button>
                     {account.connectionId && verifiableConnectionNetworks.has(account.connectionNetwork) && <button className="dropdown-item" disabled={Boolean(verifyingConnectionId)} onClick={() => verifyConnection(account)} role="menuitem" type="button">{verifyingConnectionId === account.connectionId ? 'Verificando…' : 'Verificar conexión'}</button>}
                     {account.connectionId && verifiableConnectionNetworks.has(account.connectionNetwork) && (account.status === 'expired' || account.verificationError) && <a className="dropdown-item" href={`/api/connections/${encodeURIComponent(account.connectionNetwork)}/authorize?brandId=${encodeURIComponent(account.brandId)}`} role="menuitem">Reconectar {getNetwork(account.connectionNetwork)?.name}</a>}
                     {account.connectionId && <button className="dropdown-item" onClick={() => {
@@ -2252,6 +2284,20 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
         </button>
       </div>
       {workspaceError && <p className="auth-error" role="alert">{workspaceError}</p>}
+      <div className="brand-context-selector">
+        <label htmlFor="managed-workspace-select">Espacio activo</label>
+        <select id="managed-workspace-select" value={initialData.workspaceId} onChange={(event) => event.target.value === '__create__' ? openWorkspaceForm('workspace-create') : selectWorkspace(event.target.value)}>
+          {workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          <option value="__create__">＋ Crear espacio…</option>
+        </select>
+        <label htmlFor="managed-brand-select">Marca activa</label>
+        <select id="managed-brand-select" value={activeBrandId} onChange={(event) => event.target.value === '__create__' ? openBrandForm('brand-create') : setActiveBrandId(event.target.value)}>
+          <option value="">Sin marca seleccionada · todo el espacio</option>
+          {activeWorkspace?.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+          <option value="__create__">＋ Crear marca…</option>
+        </select>
+        {brandSelectionError && <p className="auth-error" role="alert">{brandSelectionError}</p>}
+      </div>
       <div className="workspace-management-grid">
         <section className="workspace-list-card">
           <div className="section-heading">
@@ -2278,7 +2324,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
           </div>
           <div className="managed-brand-list">
             {activeWorkspace?.brands.map((brand) => (
-              <article className="managed-brand" key={brand.id}>
+              <article className={`managed-brand ${brand.id === activeBrandId ? 'selected' : ''}`} key={brand.id}>
                 {brand.logoUrl
                   ? <img src={brand.logoUrl} alt={`Logotipo de ${brand.name}`} referrerPolicy="no-referrer" />
                   : <span className="brand-logo-placeholder">{brand.name.charAt(0).toUpperCase()}</span>}
@@ -2288,6 +2334,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                   {brand.settings.website && <a href={brand.settings.website} target="_blank" rel="noreferrer">{brand.settings.website}</a>}
                 </div>
                 <span className="brand-color-swatch" style={{ background: brand.settings.primaryColor }} aria-label={`Color principal ${brand.settings.primaryColor}`} />
+                <button className="context-action" aria-pressed={brand.id === activeBrandId} disabled={savingBrandSelection} onClick={() => setActiveBrandId(brand.id === activeBrandId ? '' : brand.id)} type="button">{brand.id === activeBrandId ? 'Desactivar marca' : 'Activar marca'}</button>
                 <button className="icon-button" aria-label={`Editar marca ${brand.name}`} onClick={() => openBrandForm('brand-edit', brand)} type="button">✎</button>
                 <button className="icon-button destructive-item" aria-label={`Eliminar marca ${brand.name}`} onClick={() => { setWorkspaceError(''); setDialog({ type: 'brand-delete', brand }); }} type="button">×</button>
               </article>
@@ -2361,7 +2408,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
       <main className="main-content">
         <header className="topbar">
           <div className="breadcrumb">
-            <button onClick={() => goToPage('Inicio')} type="button">{activeWorkspace?.name || 'Sin espacio'}</button>
+            <button className="active-context-name" onClick={() => goToPage('Inicio')} type="button">{activeWorkspace?.name || 'Sin espacio'}</button>
             <span>/</span>
             <span className="breadcrumb-brand">{activeBrand?.name || 'Sin marca seleccionada'}</span>
             <span>/</span>
@@ -2478,7 +2525,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
             </div>
             {!selectedNetwork ? (
               <>
-                <p className="modal-description">Selecciona una red para guardar una referencia local en la marca «{activeBrand?.name}». No se conectará ninguna cuenta.</p>
+                <p className="modal-description">Selecciona la red que quieres organizar en la marca «{activeBrand?.name}». Puedes conectar una cuenta disponible o guardar una referencia local.</p>
                 <div className="network-picker">
                   {networks.map((network) => (
                     <button className="network-picker-option" key={network.id} onClick={() => setSelectedNetwork(network.id)} type="button">
@@ -2491,6 +2538,9 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
               </>
             ) : (
               <>
+                {activeBrandId && ({ facebook: facebookConnectionAvailable, youtube: youtubeConnectionAvailable, instagram: instagramConnectionAvailable, tiktok: tiktokConnectionAvailable })[selectedNetwork] && (
+                  <div className="connection-introduction"><p>Conecta tu cuenta desde el sitio oficial de {getNetwork(selectedNetwork)?.name}. Allí podrás revisar y aceptar el acceso; después volverás a LOP para organizarla en tu marca.</p><a className="primary-button" href={`/api/connections/${selectedNetwork}/authorize?brandId=${encodeURIComponent(activeBrandId)}`}>Conectar {getNetwork(selectedNetwork)?.name}</a></div>
+                )}
                 <div className="modal-notice"><strong>Cuenta de referencia local</strong><br />No se conectará a la red ni permitirá publicar. Para Facebook, Instagram profesional o YouTube, usa su botón «Conectar» en Cuentas sociales.</div>
                   <div className="authorization-steps">
                     <strong>Procedimiento previsto de autorización</strong>
@@ -2695,6 +2745,22 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
             </section>
           )}
 
+          {dialog.type === 'account-permissions' && (
+            <section className="composer-modal permissions-modal" aria-labelledby="account-permissions-title" aria-modal="true" role="dialog">
+              <div className="modal-heading"><div><p className="eyebrow">ACCESO AUTORIZADO</p><h2 id="account-permissions-title">Permisos de {dialog.account.name}</h2></div><button className="close-button" onClick={() => setDialog(null)} type="button" aria-label="Cerrar">×</button></div>
+              <p className="modal-description">Estos permisos indican a qué información puede acceder LOP. Los estados reflejan la última comprobación guardada, no una consulta nueva a la plataforma.</p>
+              {dialog.account.verifiedAt && <p className="connection-help">Última comprobación: {formatInZone(new Date(dialog.account.verifiedAt), brandTimezoneValue, { dateStyle: 'medium', timeStyle: 'short' })}</p>}
+              {dialog.account.connectionId ? <div className="permissions-table-wrap"><table className="permissions-table">
+                <thead><tr><th>Permiso técnico</th><th>Para qué sirve</th><th>Estado</th></tr></thead>
+                <tbody>{getAccountPermissions(dialog.account, connectionMethods[dialog.account.connectionNetwork]?.requiredScopes || connectionMethods[dialog.account.connectionNetwork]?.requiredPermissions || (dialog.account.connectionNetwork === 'youtube' ? ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/youtube.upload'] : [])).map((permission) => (
+                  <tr key={permission.scope}><td><code>{permission.scope}</code></td><td>{permission.description}</td><td>{permission.status}</td></tr>
+                ))}</tbody>
+              </table>{!dialog.account.grantedScopes?.length && <p>No hay permisos concedidos registrados para esta cuenta.</p>}</div>
+                : <p>Esta cuenta es una referencia local y no tiene permisos concedidos por la plataforma.</p>}
+              <div className="modal-actions"><button className="primary-button" onClick={() => setDialog(null)} type="button">Cerrar</button></div>
+            </section>
+          )}
+
           {dialog.type === 'account-details' && (
             <section className="composer-modal settings-modal" aria-labelledby="account-details-title" aria-modal="true" role="dialog">
               <div className="modal-heading"><div><p className="eyebrow">{dialog.account.connectionId ? 'CONEXIÓN OFICIAL' : 'CUENTA DE DEMOSTRACIÓN'}</p><h2 id="account-details-title">Detalles de la cuenta</h2></div><button className="close-button" onClick={() => setDialog(null)} type="button" aria-label="Cerrar">×</button></div>
@@ -2702,7 +2768,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                 <div><strong>Nombre visible</strong><span>{dialog.account.name}</span></div>
                 <div><strong>Red</strong><span>{getNetwork(dialog.account.networkId)?.name}</span></div>
                 <div><strong>Estado</strong><span>{dialog.account.connectionId ? dialog.account.status === 'expired' ? 'Autorización no vigente; vuelve a conectar la cuenta' : `Conexión oficial verificada con ${getNetwork(dialog.account.connectionNetwork || dialog.account.networkId)?.name || 'el proveedor'}` : 'Sin conectar · referencia local de demostración'}</span></div>
-                {dialog.account.connectionId && <div><strong>Permisos concedidos</strong><span>{dialog.account.grantedScopes?.join(', ') || 'No se recibieron permisos'}</span></div>}
+                {dialog.account.connectionId && <div><strong>Acceso autorizado</strong><button className="context-action" onClick={() => setDialog({ type: 'account-permissions', account: dialog.account })} type="button">Ver permisos</button></div>}
                 {dialog.account.connectionNetwork === 'instagram' && (
                   <>
                     <div><strong>Cuenta de Instagram</strong><span>{dialog.account.username ? `@${dialog.account.username} · ` : ''}{dialog.account.providerAccountId}</span></div>
@@ -2715,7 +2781,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                 <div><strong>Identificador local</strong><span>{dialog.account.id}</span></div>
               </div>
               <p className="modal-notice">{dialog.account.connectionId
-                ? 'LOP cifra las credenciales de OAuth en SQLite y no las devuelve al navegador. La conexión no publica contenido.'
+                ? 'Tu acceso se guarda protegido. Puedes revisar los permisos y comprobar la conexión desde esta ventana.'
                 : 'Esta referencia es local; no se ha autorizado ni conectado ninguna cuenta social.'}</p>
               {renderVerificationFeedback(dialog.account)}
               <div className="modal-actions">
@@ -2729,7 +2795,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
             <section className="composer-modal settings-modal" aria-labelledby="facebook-page-selection-title" aria-modal="true" role="dialog">
               <div className="modal-heading"><div><p className="eyebrow">AUTORIZACIÓN DE META</p><h2 id="facebook-page-selection-title">Elige las páginas de Facebook</h2></div><button className="close-button" disabled={savingFacebookPages} onClick={cancelFacebookPageSelection} type="button" aria-label="Cerrar">×</button></div>
               <p className="modal-description">Meta encontró {dialog.selection.pages.length} página(s). Selecciona solo las que quieras conectar y asigna a cada una un espacio y una marca de tu cuenta.</p>
-              <p className="modal-notice">Permisos autorizados: {dialog.selection.grantedScopes.join(', ')}. Los tokens de esta selección temporal están cifrados y vencen en 30 minutos. Las páginas no seleccionadas no se guardarán.</p>
+              <p className="connection-help">Tienes 30 minutos para completar este proceso de conexión. Este plazo no es la duración de la cuenta conectada ni de sus permisos. Las páginas no seleccionadas no se guardarán. Podrás consultar el acceso concedido en «Ver permisos».</p>
               <div className="facebook-page-selection-list">
                 {dialog.selection.pages.map((page, index) => {
                   const assignment = facebookPageAssignments[page.id];
@@ -2789,7 +2855,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
             <section className="composer-modal settings-modal" aria-labelledby="youtube-channel-selection-title" aria-modal="true" role="dialog">
               <div className="modal-heading"><div><p className="eyebrow">AUTORIZACIÓN DE GOOGLE</p><h2 id="youtube-channel-selection-title">Elige los canales de YouTube</h2></div><button className="close-button" disabled={savingYoutubeChannels} onClick={cancelYouTubeChannelSelection} type="button" aria-label="Cerrar">×</button></div>
               <p className="modal-description">Google encontró {dialog.selection.channels.length} canal(es). Selecciona solo los que quieras conectar y asigna cada uno a un espacio y una marca.</p>
-              <p className="modal-notice">Permiso autorizado: {dialog.selection.grantedScopes.join(', ')}. Las credenciales temporales están cifradas y vencen en 30 minutos. No se publicará contenido.</p>
+              <p className="connection-help">Google confirmó el acceso a tus canales. Tienes 30 minutos para completar este proceso de conexión; este plazo no es la duración de la cuenta conectada ni de sus permisos. Podrás consultar el acceso concedido en «Ver permisos».</p>
               <div className="facebook-page-selection-list">
                 {dialog.selection.channels.map((channel, index) => {
                   const assignment = youtubeChannelAssignments[channel.id];
@@ -2852,7 +2918,7 @@ function WorkspaceApp({ user, initialData, initialWorkspaces, onLogout, onWorksp
                 <button className="close-button" disabled={savingInstagramAccounts} onClick={cancelInstagramAccountSelection} type="button" aria-label="Cerrar">×</button>
               </div>
               <p className="modal-description">Meta encontró {dialog.selection.accounts.length} cuenta(s) profesionales vinculadas a páginas de Facebook. Selecciona las que quieras conectar y asigna cada una a un espacio y una marca.</p>
-              <p className="modal-notice">Permisos autorizados: {dialog.selection.grantedScopes.join(', ')}. Esta selección vence en 30 minutos. No se publicará contenido ni se cambiará la asignación de tus páginas de Facebook.</p>
+              <p className="connection-help">Elige las cuentas profesionales que quieras conectar. Tienes 30 minutos para completar este proceso de conexión; este plazo no es la duración de la cuenta conectada ni de sus permisos. Se conserva la asignación de tus páginas de Facebook. Podrás consultar el acceso concedido en «Ver permisos».</p>
               <div className="facebook-page-selection-list">
                 {dialog.selection.accounts.map((account, index) => {
                   const assignment = instagramAccountAssignments[account.id];

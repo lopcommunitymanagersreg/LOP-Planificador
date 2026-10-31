@@ -31,9 +31,9 @@ function browserScenario() {
   const user = { id: 'ui-owner', name: 'Usuario de prueba', email: 'ui@example.test' };
   const workspaces = [
     { id: 'workspace-ui', name: 'Espacio UI', brands: [
-      { id: 'brand-a', name: 'Marca A', settings: {} }, { id: 'brand-b', name: 'Marca B', settings: {} },
+      { id: 'brand-a', name: 'Marca A', settings: {} }, { id: 'brand-b', name: 'Marca B con un nombre mucho más largo para comprobar las columnas', settings: {} },
     ] },
-    { id: 'workspace-second', name: 'Segundo espacio', brands: [{ id: 'brand-c', name: 'Marca C', settings: {} }] },
+    { id: 'workspace-second', name: 'Segundo espacio con un nombre mucho más largo', brands: [{ id: 'brand-c', name: 'Marca C', settings: {} }] },
   ];
   const accounts = () => state.activeWorkspaceId === 'workspace-ui' ? [
     { id: 'account-youtube', connectionId: 'youtube-ui', connectionNetwork: 'youtube', networkId: 'youtube',
@@ -55,7 +55,7 @@ function browserScenario() {
     const body = options.body ? JSON.parse(options.body) : {};
     if (path === '/auth/session') return reply({ user });
     if (path === '/auth/methods') return reply({ google: true, emailDelivery: false });
-    if (path === '/connections/methods') return reply({ facebook: { available: true }, youtube: { available: true }, instagram: { available: false } });
+    if (path === '/connections/methods') return reply({ facebook: { available: true }, youtube: { available: true }, instagram: { available: false }, tiktok: { available: Boolean(state.tiktokAvailable) } });
     if (path.endsWith('/pending')) return reply({ pending: null });
     if (path === '/data' && method === 'GET') return reply({ profile: user, workspaceId: state.activeWorkspaceId, activeBrandId: state.selections[state.activeWorkspaceId], accounts: accounts(), posts: state.savedPost ? [state.savedPost] : [], accountOrder: state.orders[state.activeWorkspaceId] || accounts().map((account) => account.id) });
     if (path.startsWith('/data/posts/') && method === 'PUT') { state.savedPost = body; store(); return reply(body); }
@@ -99,6 +99,11 @@ function browserScenario() {
     return reply({ error: `Solicitud inesperada: ${method} ${path}` }, 500);
   };
   const check = (condition, message) => { if (!condition) throw new Error(message); state.passed.push(message); store(); };
+  const contextPositions = () => {
+    const top = [...document.querySelectorAll('[data-testid="active-context"] > div')].map((item) => item.getBoundingClientRect().left);
+    const bottom = ['home-active-workspace', 'home-active-brand'].map((id) => document.querySelector(`label[for="${id}"]`).getBoundingClientRect().left);
+    return { top, bottom, aligned: top.every((left, index) => Math.abs(left - bottom[index]) < 1) };
+  };
   const until = async (condition, message) => {
     for (let count = 0; count < 300; count += 1) { if (condition()) return; await pause(30); }
     throw new Error(message);
@@ -130,9 +135,21 @@ function browserScenario() {
       finish(); return;
     }
     if (state.stage === 0) {
+      const columns = contextPositions();
+      check(columns.aligned, 'Espacio y Marca comparten exactamente los ejes de sus selectores');
+      select('home-active-workspace', '__create__');
+      await until(() => document.getElementById('workspace-name'), 'No abrió Crear espacio desde el selector');
+      check(Boolean(document.getElementById('workspace-name')), 'El selector compacto permite crear espacios');
+      click('Cancelar', document.querySelector('[role="dialog"]'));
+      select('home-active-brand', '__create__');
+      await until(() => document.getElementById('brand-name'), 'No abrió Crear marca desde el selector');
+      check(Boolean(document.getElementById('brand-name')), 'El selector compacto permite crear marcas');
+      click('Cancelar', document.querySelector('[role="dialog"]'));
       check(document.querySelector('[data-testid="active-context"]').textContent.includes('Espacio UI'), 'Inicio muestra el nombre real del espacio');
       check(document.querySelector('[data-testid="active-context"]').textContent.includes('Marca A'), 'Inicio muestra la marca activa');
       select('home-active-brand', 'brand-b'); await saved('brand-b');
+      check(document.querySelector('[data-testid="active-context"]').textContent.includes('Marca B'), 'Inicio actualiza automáticamente la marca activa');
+      check(contextPositions().aligned && contextPositions().top.every((left, index) => Math.abs(left - columns.top[index]) < 1), 'Un nombre de marca largo no mueve ninguna columna');
       state.stage = 1; store(); location.reload(); return;
     }
     if (state.stage === 1) {
@@ -141,20 +158,40 @@ function browserScenario() {
       state.stage = 2; store(); location.reload(); return;
     }
     check(document.getElementById('home-active-brand').value === '', 'Sin marca seleccionada se conserva al recargar');
+    check(contextPositions().aligned, 'Sin marca activa se conserva la alineación de ambas columnas');
     click('Cuentas sociales');
     await until(() => document.getElementById('accounts-brand-filter'), 'Cuentas no cargó');
+    await until(() => document.querySelector('.tiktok-connect-button img')?.naturalWidth > 0, 'No cargó el logotipo oficial de TikTok');
+    check(document.querySelector('button.tiktok-connect-button')?.disabled && !document.querySelector('a.tiktok-connect-button'), 'TikTok muestra su botón oficial deshabilitado cuando falta configuración');
     check(document.querySelectorAll('.registered-accounts .registered-account').length === 2, 'Sin marca se muestran todas las cuentas del espacio');
     check(!document.querySelector('a[href*="youtube/authorize"]'), 'Una conexión nueva exige seleccionar una marca');
     select('accounts-brand-filter', 'brand-a'); await saved('brand-a');
+    const accountCard = document.querySelector('.registered-account');
+    const size = accountCard.getBoundingClientRect();
+    check(Math.abs(size.width - size.height) < 2 && getComputedStyle(accountCard).boxShadow !== 'none', 'Cuentas sociales usa tarjetas cuadradas con relieve');
+    check(!document.querySelector('.registered-account .sample-label'), 'Las tarjetas no muestran franjas técnicas de permisos');
+    document.querySelector('[aria-label="Opciones de Canal de prueba"]').click();
+    await until(() => button('Ver permisos'), 'No aparece Ver permisos');
+    click('Ver permisos');
+    await until(() => document.querySelector('.permissions-table'), 'No abrió el diálogo de permisos');
+    check(document.querySelector('.permissions-table').textContent.includes('Pendiente de autorización'), 'Un permiso de carga no concedido aparece pendiente');
+    check(document.querySelector('.permissions-table').textContent.includes('youtube.readonly') && document.querySelector('.permissions-table').textContent.includes('Consultar tu canal'), 'El diálogo muestra permisos técnicos y su explicación');
+    click('Cerrar', document.querySelector('[role="dialog"]'));
     await until(() => document.querySelector('.google-connect-button img')?.naturalWidth > 0, 'No cargó el logotipo oficial');
     const google = document.querySelector('.google-connect-button');
     check(google.textContent === 'Conectar YouTube con Google' && google.getAttribute('href') === '/api/connections/youtube/authorize?brandId=brand-a', 'Botón Google con logotipo, texto y ruta OAuth conservada');
+    state.tiktokAvailable = true; store();
 
     document.querySelector('.workspace-switcher').click();
     await until(() => document.querySelector('.managed-workspace'), 'No abrió espacios');
+    click('Desactivar marca', document.querySelector('.managed-brand.selected'));
+    await saved(null);
+    check(!document.querySelector('.managed-brand.selected'), 'Desactivar la marca cambia el contexto sin eliminarla');
+    select('managed-brand-select', 'brand-a'); await saved('brand-a');
     click('Seleccionar', [...document.querySelectorAll('.managed-workspace')].find((item) => item.textContent.includes('Segundo espacio')));
     await until(() => document.querySelector('[data-testid="active-context"]')?.textContent.includes('Segundo espacio'), 'No cambió el espacio');
     check(document.getElementById('home-active-brand').value === 'brand-c', 'Cada espacio mantiene su marca activa');
+    check(contextPositions().aligned, 'Cambiar a un espacio con nombre largo conserva la alineación');
     document.querySelector('.workspace-switcher').click();
     await until(() => document.querySelector('.managed-workspace'), 'No abrió espacios de nuevo');
     click('Seleccionar', [...document.querySelectorAll('.managed-workspace')].find((item) => item.textContent.includes('Espacio UI')));
@@ -177,6 +214,8 @@ function browserScenario() {
     row.querySelector('button').click();
     await until(() => row.querySelector('button').getAttribute('aria-pressed') === 'false', 'No se desactivaron las notificaciones');
     click('Listo'); click('Cuentas sociales');
+    await until(() => document.querySelector('a.tiktok-connect-button img')?.naturalWidth > 0, 'No aparece el botón habilitado de TikTok');
+    check(document.querySelector('a.tiktok-connect-button').getAttribute('href') === '/api/connections/tiktok/authorize?brandId=brand-a' && document.querySelector('a.tiktok-connect-button').textContent === 'Conectar TikTok', 'El botón TikTok con logotipo usa el OAuth existente y la marca activa');
     await until(() => document.querySelector('[aria-label="Opciones de Canal de prueba"]'), 'No encontró la cuenta');
     document.querySelector('[aria-label="Opciones de Canal de prueba"]').click();
     await until(() => button('Ver detalles'), 'No abrió el menú de la cuenta');
@@ -288,7 +327,7 @@ test('frontend: context selection, visible verification feedback, recovery and G
   try {
     await vite.listen();
     const port = vite.httpServer.address().port;
-    for (const viewport of ['1440,1000', '390,844']) {
+    for (const viewport of ['1440,1000', '768,1024', '390,844']) {
     const { stdout } = await runFile(browser, [
       '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
       '--disable-background-networking', '--disable-extensions', '--no-sandbox',
@@ -300,7 +339,7 @@ test('frontend: context selection, visible verification feedback, recovery and G
     const result = JSON.parse(match[1].replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'));
     assert.equal(result.ok, true, result.error);
     assert.equal(result.unexpected.length, 0);
-    assert.equal(result.passed.length, 36);
+    assert.equal(result.passed.length, 50);
     console.log(`Frontend ${viewport}: ${result.passed.length} comprobaciones de navegador superadas.`);
     }
   } finally {

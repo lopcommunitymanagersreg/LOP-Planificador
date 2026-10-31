@@ -18,8 +18,9 @@ import express from 'express';
 import helmet from 'helmet';
 import nodemailer from 'nodemailer';
 import { createInstagramOAuthConfig, initializeInstagramDatabase, registerInstagramRoutes } from './instagram.js';
-import { initializeYouTubeDatabase, registerYouTubeRoutes } from './youtube.js';
+import { initializeYouTubeDatabase, registerYouTubeRoutes, youtubeRequiredScopes } from './youtube.js';
 import { createFacebookVerifier, registerFacebookVerification } from './facebook.js';
+import { createTikTokOAuthConfig, initializeTikTokDatabase, registerTikTokRoutes, getTikTokConnections, tiktokRequiredScopes } from './tiktok.js';
 
 const scrypt = promisify(scryptCallback);
 const sessionCookie = 'lop_session';
@@ -33,7 +34,6 @@ const networkIds = new Set(['facebook', 'instagram', 'threads', 'tiktok', 'youtu
 const postFormats = new Set(['text', 'image', 'video', 'carousel', 'story', 'reel', 'short']);
 const facebookPageSelectionDurationMs = 30 * 60 * 1000;
 const youtubeChannelSelectionDurationMs = 30 * 60 * 1000;
-const youtubeReadOnlyScope = 'https://www.googleapis.com/auth/youtube.readonly';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const jsonError = (response, status, message) => response.status(status).json({ error: message });
@@ -624,6 +624,7 @@ export function createApp({
   facebookOAuthConfig = createFacebookOAuthConfig(),
   instagramOAuthConfig = createInstagramOAuthConfig(),
   youtubeOAuthConfig = createYouTubeOAuthConfig(),
+  tiktokOAuthConfig = createTikTokOAuthConfig(),
   youtubeOAuthClient = youtubeOAuthConfig.configured
     ? new OAuth2Client(youtubeOAuthConfig.clientId, youtubeOAuthConfig.clientSecret, youtubeOAuthConfig.redirectUri)
     : null,
@@ -634,6 +635,7 @@ export function createApp({
   const database = createDatabase(databasePath);
   initializeInstagramDatabase(database);
   initializeYouTubeDatabase(database);
+  initializeTikTokDatabase(database);
   const app = express();
   const secureCookie = process.env.NODE_ENV === 'production';
   const sessionCookieOptions = {
@@ -1155,14 +1157,18 @@ export function createApp({
         reason: 'OAuth separado mediante Facebook Login; verifica la cuenta profesional y permite asignarla a una marca.',
       },
       threads: { available: false, reason: 'Integración pendiente de la validación secuencial de Facebook.' },
-      tiktok: { available: false, reason: 'Integración pendiente de la validación secuencial de Facebook.' },
+      tiktok: {
+        available: Boolean(tiktokOAuthConfig.configured && socialTokenEncryptionKey),
+        missing: [...(tiktokOAuthConfig.missing || []), ...(!socialTokenEncryptionKey ? ['SOCIAL_TOKEN_ENCRYPTION_KEY'] : [])],
+        requiredScopes: [...tiktokRequiredScopes],
+      },
       youtube: {
         available: Boolean(youtubeOAuthConfig.configured && youtubeOAuthClient && socialTokenEncryptionKey),
         missing: [
           ...(youtubeOAuthConfig.missing || []),
           ...(!socialTokenEncryptionKey ? ['SOCIAL_TOKEN_ENCRYPTION_KEY'] : []),
         ],
-        requiredScopes: [youtubeReadOnlyScope],
+        requiredScopes: [...youtubeRequiredScopes],
       },
     });
   });
@@ -1751,6 +1757,10 @@ export function createApp({
   registerFacebookVerification({ app, database, config: facebookOAuthConfig, encryptionKey: socialTokenEncryptionKey,
     decryptToken: decryptSocialToken, requireSession, getActiveWorkspaceId, verifyPage: verifyFacebookPage });
 
+  registerTikTokRoutes({ app, database, config: tiktokOAuthConfig, encryptionKey: socialTokenEncryptionKey,
+    encryptToken: encryptSocialToken, decryptToken: decryptSocialToken,
+    requireSession, getActiveWorkspaceId, parseCookies, fetchImpl });
+
   registerInstagramRoutes({
     app, database, config: instagramOAuthConfig, encryptionKey: socialTokenEncryptionKey,
     encryptToken: encryptSocialToken, decryptToken: decryptSocialToken,
@@ -1803,7 +1813,7 @@ export function createApp({
       ...connection,
       grantedScopes: JSON.parse(connection.grantedScopes),
     }));
-    const connections = [...facebookConnections, ...youtubeConnections, ...getInstagramConnections(request.user.id, workspaceId)];
+    const connections = [...facebookConnections, ...youtubeConnections, ...getInstagramConnections(request.user.id, workspaceId), ...getTikTokConnections(database, request.user.id, workspaceId)];
     response.json({ connections });
   });
 
@@ -1853,8 +1863,12 @@ export function createApp({
       WHERE c.user_id = ? AND c.workspace_id = ? AND (? IS NULL OR c.brand_id = ?)
         AND c.status = 'connected' AND (c.expires_at IS NULL OR c.expires_at > ?)
     `).get(request.user.id, workspaceId, brandId, brandId, Date.now()).count;
+    const tiktokConnections = database.prepare(`SELECT COUNT(*) AS count FROM tiktok_connections c
+      JOIN social_accounts a ON a.user_id = c.user_id AND a.id = c.account_id AND a.workspace_id = c.workspace_id AND a.brand_id = c.brand_id
+      WHERE c.user_id = ? AND c.workspace_id = ? AND (? IS NULL OR c.brand_id = ?)
+        AND c.status = 'connected' AND c.expires_at > ?`).get(request.user.id, workspaceId, brandId, brandId, Date.now()).count;
     response.json({ workspaceId, brandId, registeredAccounts,
-      officialConnections: facebookConnections + youtubeConnections + instagramConnections });
+      officialConnections: facebookConnections + youtubeConnections + instagramConnections + tiktokConnections });
   });
 
   app.patch('/api/connections/:connectionId', requireSession, (request, response) => {
@@ -1873,7 +1887,10 @@ export function createApp({
     const instagramConnection = connection || youtubeConnection ? null : database.prepare(`
       SELECT account_id AS accountId FROM instagram_connections WHERE id = ? AND user_id = ?
     `).get(request.params.connectionId, request.user.id);
-    const target = connection || youtubeConnection || instagramConnection;
+    const tiktokConnection = connection || youtubeConnection || instagramConnection ? null : database.prepare(
+      'SELECT account_id AS accountId FROM tiktok_connections WHERE id = ? AND user_id = ?',
+    ).get(request.params.connectionId, request.user.id);
+    const target = connection || youtubeConnection || instagramConnection || tiktokConnection;
     if (!target) return jsonError(response, 404, 'No se encontró la conexión solicitada.');
     database.transaction(() => {
       if (connection) {
@@ -1886,6 +1903,9 @@ export function createApp({
           UPDATE youtube_connections SET workspace_id = ?, brand_id = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ? AND user_id = ?
         `).run(workspaceId, brandId, request.params.connectionId, request.user.id);
+      } else if (tiktokConnection) {
+        database.prepare('UPDATE tiktok_connections SET workspace_id = ?, brand_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?')
+          .run(workspaceId, brandId, request.params.connectionId, request.user.id);
       } else {
         database.prepare(`
           UPDATE instagram_connections SET workspace_id = ?, brand_id = ?, updated_at = CURRENT_TIMESTAMP
@@ -1908,7 +1928,10 @@ export function createApp({
     const instagramConnection = connection || youtubeConnection ? null : database.prepare(`
       SELECT account_id AS accountId FROM instagram_connections WHERE id = ? AND user_id = ? AND workspace_id = ?
     `).get(request.params.connectionId, request.user.id, getActiveWorkspaceId(request.user.id));
-    const target = connection || youtubeConnection || instagramConnection;
+    const tiktokConnection = connection || youtubeConnection || instagramConnection ? null : database.prepare(
+      'SELECT account_id AS accountId FROM tiktok_connections WHERE id = ? AND user_id = ? AND workspace_id = ?',
+    ).get(request.params.connectionId, request.user.id, getActiveWorkspaceId(request.user.id));
+    const target = connection || youtubeConnection || instagramConnection || tiktokConnection;
     if (!target) return jsonError(response, 404, 'No se encontró la conexión del espacio activo.');
     database.prepare('DELETE FROM social_accounts WHERE id = ? AND user_id = ?')
       .run(target.accountId, request.user.id);
@@ -2053,7 +2076,7 @@ export function createApp({
     if (brands.length === 1) return jsonError(response, 409, 'Conserva al menos una marca en el espacio.');
     const replacementBrandId = brands.find(({ id }) => id !== brand.id).id;
     database.transaction(() => {
-      for (const table of ['social_connections', 'youtube_connections', 'instagram_connections']) {
+      for (const table of ['social_connections', 'youtube_connections', 'instagram_connections', 'tiktok_connections']) {
         database.prepare(`UPDATE ${table} SET brand_id = ?, updated_at = CURRENT_TIMESTAMP
           WHERE user_id = ? AND workspace_id = ? AND brand_id = ?`)
           .run(replacementBrandId, request.user.id, brand.workspaceId, brand.id);
@@ -2170,7 +2193,11 @@ export function createApp({
       ...connection, connectionId: connection.id, connectionStatus: connection.status,
       connectionNetwork: 'instagram', grantedScopes: JSON.stringify(connection.grantedScopes),
     }));
-    const connectedAccounts = new Map([...facebookAccounts, ...youtubeAccounts, ...instagramAccounts]
+    const tiktokAccounts = getTikTokConnections(database, request.user.id, workspaceId).map((connection) => ({
+      ...connection, connectionId: connection.id, connectionStatus: connection.status,
+      connectionNetwork: 'tiktok', grantedScopes: JSON.stringify(connection.grantedScopes),
+    }));
+    const connectedAccounts = new Map([...facebookAccounts, ...youtubeAccounts, ...instagramAccounts, ...tiktokAccounts]
       .map((connection) => [connection.accountId, connection]));
     const accounts = database.prepare(`
       SELECT id, name, network_id AS networkId, status,
@@ -2245,7 +2272,7 @@ export function createApp({
     const existing = database.prepare('SELECT workspace_id AS workspaceId FROM social_accounts WHERE user_id = ? AND id = ?')
       .get(request.user.id, account.id);
     if (existing && existing.workspaceId !== workspaceId) return jsonError(response, 404, 'No se encontró la cuenta solicitada.');
-    const officialConnection = ['social_connections', 'youtube_connections', 'instagram_connections']
+    const officialConnection = ['social_connections', 'youtube_connections', 'instagram_connections', 'tiktok_connections']
       .some((table) => database.prepare(`SELECT 1 FROM ${table} WHERE account_id = ? AND user_id = ?`)
         .get(account.id, request.user.id));
     if (officialConnection) return jsonError(response, 409, 'Usa las opciones de la conexión oficial para reasignarla o reconectarla.');
@@ -2292,7 +2319,7 @@ export function createApp({
       const destinationNetworks = new Set();
       for (const id of post.accountIds) {
         const account = database.prepare('SELECT network_id AS network FROM social_accounts WHERE id = ? AND user_id = ? AND workspace_id = ? AND brand_id = ?').get(id, request.user.id, workspaceId, brandId);
-        const table = { facebook: 'social_connections', youtube: 'youtube_connections', instagram: 'instagram_connections' }[account?.network];
+        const table = { facebook: 'social_connections', youtube: 'youtube_connections', instagram: 'instagram_connections', tiktok: 'tiktok_connections' }[account?.network];
         const connection = table && database.prepare(`SELECT * FROM ${table} WHERE account_id = ? AND user_id = ? AND workspace_id = ? AND brand_id = ?`).get(id, request.user.id, workspaceId, brandId);
         if (!connection || connection.status !== 'connected' || !connection.verified_at || connection.last_error_code || (connection.expires_at && connection.expires_at <= Date.now())) return jsonError(response, 400, 'Selecciona únicamente cuentas oficiales verificadas de la marca y espacio del borrador.');
         destinationNetworks.add(account.network);
